@@ -1,1 +1,1 @@
-# SnakAI
+# SnakeAI
