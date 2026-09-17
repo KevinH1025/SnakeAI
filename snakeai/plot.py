@@ -12,20 +12,56 @@ import csv
 from pathlib import Path
 
 
+# Must stay identical to snakeai.train.METRIC_COLUMNS. Copied rather than imported so that
+# plotting a run never has to load torch. A test compares the two lists.
+METRIC_COLUMNS = ["step", "episodes", "epsilon", "loss", "return_mean",
+                  "score_mean", "score_max", "best_score", "steps_per_sec", "wall_s"]
+
+
 def read_metrics(run_dir: Path) -> dict[str, list[float]]:
     path = run_dir / "metrics.csv"
     if not path.exists():
         raise FileNotFoundError(f"no metrics.csv in {run_dir}")
-    with path.open() as f:
-        rows = list(csv.DictReader(f))
-    if not rows:
+
+    with path.open(newline="") as f:
+        raw = list(csv.reader(f))
+    if not raw:
         raise ValueError(f"{path} has no data rows yet")
+    header, rows = raw[0], raw[1:]
+
+    # Older runs wrote one column fewer, and a restart could append today's wider rows under
+    # that narrower header. Matching every row to the header would then shift each later column
+    # by one without complaining, so rows are matched on their own width instead. Today's layout
+    # wins when any row has it, and the file's header is the fallback for everything else.
+    keep = [row for row in rows if len(row) == len(METRIC_COLUMNS)]
+    names = METRIC_COLUMNS
+    if not keep:
+        names = header
+        keep = [row for row in rows if len(row) == len(header)]
+
+    if not keep:
+        raise ValueError(f"{path} has no data rows yet")
+
+    # One file can still hold more than one run. A restart begins again from step 0, and a
+    # resume replays the steps between its checkpoint and wherever the previous run stopped.
+    # Reading backwards and keeping only steps that keep falling leaves exactly the rows
+    # leading up to the newest one, and drops the superseded ones either way they overlap.
+    latest = []
+    limit = float("inf")
+    for row in reversed(keep):
+        step = float(row[0])
+        if step < limit:
+            latest.append(row)
+            limit = step
+    keep = latest[::-1]
+
+    skipped = len(rows) - len(keep)
+    if skipped:
+        print(f"note: skipped {skipped} row(s) in {path.name}, left over from an earlier run")
+
     columns: dict[str, list[float]] = {}
-    for key in rows[0]:
-        values = []
-        for row in rows:
-            values.append(float(row[key]))
-        columns[key] = values
+    for i, key in enumerate(names):
+        columns[key] = [float(row[i]) for row in keep]
 
     return columns
 

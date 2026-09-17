@@ -24,6 +24,11 @@ from .device import assert_kernels_available, describe, resolve_device, resolve_
 from .evaluate import evaluate
 from .vecenv import VecSnakeEnv
 
+# One row of metrics.csv, in order. plot.py keeps its own copy of this list because importing it
+# from here would drag torch into a plotting script. A test checks the two stay identical.
+METRIC_COLUMNS = ["step", "episodes", "epsilon", "loss", "return_mean",
+                  "score_mean", "score_max", "best_score", "steps_per_sec", "wall_s"]
+
 
 class Window:
     """The average of the last `n` values added."""
@@ -48,6 +53,42 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def _prepare_metrics_file(path: Path, resume: bool, quiet: bool) -> bool:
+    """Decide whether metrics.csv needs a fresh header, moving an unusable one aside first.
+
+    Two ways an existing file cannot be appended to. A fresh run would stack its rows on top of
+    the previous run's, so the step column restarts partway down. An older run's header is one
+    column narrower than the rows written today, and csv.DictReader then silently reads every
+    later column shifted by one. Either way the old file is renamed rather than deleted.
+    """
+    if not path.exists() or path.stat().st_size == 0:
+        return True # nothing there yet, or a run that died before its first write
+
+    with path.open(newline="") as f:
+        header = next(csv.reader(f), [])
+
+    if resume and header == METRIC_COLUMNS:
+        return False # same layout, same run, so carry on appending
+
+    spare = _free_path(path)
+    path.rename(spare)
+    if not quiet:
+        why = "header is from an older version" if resume else "belongs to an earlier run"
+        print(f"metrics  : {path.name} {why}, moved to {spare.name}")
+
+    return True
+
+
+def _free_path(path: Path) -> Path:
+    """`path` with .1, .2, ... appended, picking the first name nothing is using."""
+    n = 1
+    while True:
+        spare = path.with_name(f"{path.name}.{n}")
+        if not spare.exists():
+            return spare
+        n += 1
 
 
 def _atomic_save(obj, path: Path) -> None:
@@ -114,14 +155,11 @@ def run_training(cfg: Config, resume: str | None = None, quiet: bool = False) ->
         print(f"steps    : {cfg.train.total_steps:,}" + (f"  (resuming from {step:,})" if resume else ""))
 
     metrics_path = run_dir / "metrics.csv"
-    # A 0-byte file is left behind by a run that died before its first write and still needs
-    # a header.
-    new_file = not metrics_path.exists() or metrics_path.stat().st_size == 0
+    metrics_file_is_new = _prepare_metrics_file(metrics_path, resume=bool(resume), quiet=quiet)
     metrics_file = metrics_path.open("a", newline="")
     writer = csv.writer(metrics_file)
-    if new_file:
-        writer.writerow(["step", "episodes", "epsilon", "loss", "return_mean",
-                         "score_mean", "score_max", "best_score", "steps_per_sec", "wall_s"])
+    if metrics_file_is_new:
+        writer.writerow(METRIC_COLUMNS)
 
     if not quiet:
         print(f"updates  : {cfg.agent.updates_per_iter} x batch {cfg.agent.batch_size:,} "

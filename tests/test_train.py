@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from snakeai.config import Config, apply_overrides, from_dict, preset, to_dict
-from snakeai.train import Window, run_training
+from snakeai.train import METRIC_COLUMNS, Window, run_training
 
 
 # -- metrics ----------------------------------------------------------------------------
@@ -216,3 +216,81 @@ def test_metrics_header_carries_the_live_columns(tmp_path):
     header = (tmp_path / "metrics.csv").read_text().splitlines()[0].split(",")
     for column in ("step", "episodes", "score_mean", "score_max", "best_score"):
         assert column in header, f"missing {column}"
+
+
+def test_a_fresh_run_does_not_append_to_the_previous_run_s_metrics(tmp_path):
+    """Two runs in one dir used to share a csv, so the step column restarted partway down."""
+    run_training(short_cfg(tmp_path), quiet=True)
+    first = (tmp_path / "metrics.csv").read_text()
+    run_training(short_cfg(tmp_path), quiet=True)
+
+    assert (tmp_path / "metrics.csv.1").read_text() == first, "old rows were not kept aside"
+    steps = [int(row["step"]) for row in _rows(tmp_path / "metrics.csv")]
+    assert steps == sorted(steps), "step column goes backwards, so two runs got mixed together"
+
+
+def test_a_stale_header_is_moved_aside_instead_of_appended_under(tmp_path):
+    """A narrower header over today's rows shifts every later column and says nothing."""
+    run_training(short_cfg(tmp_path), quiet=True)
+    path = tmp_path / "metrics.csv"
+    old = [c for c in METRIC_COLUMNS if c != "best_score"] # what runs before best_score wrote
+    lines = path.read_text().splitlines()
+    path.write_text("\n".join([",".join(old)] + lines[1:]) + "\n")
+
+    run_training(short_cfg(tmp_path, **{"train.total_steps": 6000}), quiet=True,
+                 resume=str(tmp_path / "ckpt.pt"))
+
+    assert path.read_text().splitlines()[0].split(",") == METRIC_COLUMNS
+    assert (tmp_path / "metrics.csv.1").exists(), "the stale file was dropped, not kept"
+
+
+def test_plot_reads_the_same_columns_training_writes():
+    """The two lists are separate copies so plotting stays free of torch. They must agree."""
+    from snakeai.plot import METRIC_COLUMNS as plot_columns
+
+    assert plot_columns == METRIC_COLUMNS
+
+
+def test_plot_ignores_rows_left_over_from_an_older_format(tmp_path):
+    from snakeai.plot import read_metrics
+
+    old = [c for c in METRIC_COLUMNS if c != "best_score"]
+    path = tmp_path / "metrics.csv"
+    path.write_text(
+        ",".join(old) + "\n"
+        + "1,0,0.9,0.0,0.0,0.0,0,100.0,1.0\n"       # an older run, one column short
+        + "1,0,0.9,0.0,0.0,5.0,7,7,100.0,1.0\n"     # today's layout, appended underneath
+        + "2,1,0.8,0.1,1.0,6.0,9,9,100.0,2.0\n"
+    )
+    m = read_metrics(tmp_path)
+
+    assert m["step"] == [1.0, 2.0], "the narrower row was read as if it had today's layout"
+    assert m["best_score"] == [7.0, 9.0]
+    assert m["steps_per_sec"] == [100.0, 100.0], "columns are shifted"
+
+
+def _rows(path):
+    import csv as _csv
+
+    with path.open(newline="") as f:
+        return list(_csv.DictReader(f))
+
+
+def test_plot_keeps_only_the_newest_run_in_a_shared_file(tmp_path):
+    """A run dir written before the guard above can hold a restart and a resume in one file."""
+    from snakeai.plot import read_metrics
+
+    def row(step, best):
+        return f"{step},0,0.5,0.0,0.0,0.0,{best},{best},100.0,1.0"
+
+    path = tmp_path / "metrics.csv"
+    path.write_text("\n".join([
+        ",".join(METRIC_COLUMNS),
+        row(100, 1), row(200, 2), row(300, 3),  # a first run, later started over
+        row(100, 5), row(200, 6), row(300, 7),  # the run that matters, then resumed from 200
+        row(250, 8), row(400, 9),
+    ]) + "\n")
+    m = read_metrics(tmp_path)
+
+    assert m["step"] == [100.0, 200.0, 250.0, 400.0], "an abandoned run was plotted too"
+    assert m["best_score"] == [5.0, 6.0, 8.0, 9.0], "kept the wrong copy of an overlapping step"
