@@ -15,6 +15,15 @@ python -m snakeai.train --preset small          # a full learning curve in a cou
 python -m snakeai.play --checkpoint runs/dev/best.pt
 ```
 
+## What it looks like
+
+![the agent improving over training](docs/learning.gif)
+
+Four checkpoints from one run on a 16x16 board. The caption on each is the mean over 24 greedy
+games, not the game being shown, because a single game at a fixed checkpoint varies by more than
+2x. It climbs to about 96 by 300k steps then settles lower, which is what actually happened
+rather than the tidy version.
+
 ## Commands
 
 | command | what it does |
@@ -25,7 +34,7 @@ python -m snakeai.play --checkpoint runs/dev/best.pt
 | `python -m snakeai.play --human` | play it yourself (arrows / WASD) |
 | `python -m snakeai.evaluate --checkpoint PATH` | greedy evaluation on fixed seeds |
 | `python -m snakeai.plot runs/dev` | plot a run from its CSV |
-| `python -m pytest` | 50 tests, CPU only |
+| `python -m pytest` | 66 tests, CPU only |
 
 Presets: `--preset small` (8×8, minutes), `default` (20×15), `big` (40×30, the original board).
 
@@ -48,36 +57,43 @@ python -m snakeai.train --preset small --run-dir runs/small
 python -m snakeai.train --run-dir runs/dev --set train.total_steps=3000000
 
 # the ORIGINAL 40x30 board, to compare against v1's best of 94
-python -m snakeai.train --preset big --run-dir runs/big \
-    --set train.total_steps=6000000 \
-    --set train.save_every=500000
+python -m snakeai.train --preset big --run-dir runs/big
 
 # watch it play while it trains, in a second terminal. Costs the trainer nothing.
 python -m snakeai.play --checkpoint runs/big/ckpt.pt --follow
 
 # when it is done
 python -m snakeai.evaluate --checkpoint runs/big/best.pt --episodes 100
-python -m snakeai.plot runs/big --save docs/big_run.png
+python -m snakeai.plot runs/big --save docs/big_run.png     # see docs/v6_run.png for one
 
 # carry on a run that was stopped
 python -m snakeai.train --preset big --run-dir runs/big --resume runs/big/ckpt.pt \
     --set train.total_steps=12000000
 ```
 
-On a 5080 the 40x30 board runs at roughly 2,700 environment steps per second, so 6M steps is
-about 40 minutes. Throughput falls as the snake grows, because the flood fills that build the
-observation have more board to cross, so treat that as a lower bound rather than a promise.
+On a 5080 a 5M step run on the 40x30 board takes **38 minutes**, about 2,200 environment steps
+per second end to end with evaluation included. Building one observation costs 13.7 µs at length
+5 and 24.5 µs at length 300, so throughput drifts down as the snake grows.
 
-Useful knobs: `--set agent.updates_per_iter=8` and `--set agent.batch_size=2048` control how
-much it learns per round of moves, `--set train.num_envs=64` runs fewer games in parallel, plus
-`--set agent.lr=3e-4` and `--set agent.hidden=256,256`.
+Useful knobs: `--set agent.updates_per_iter=2` and `--set agent.batch_size=8192` control how much
+it learns per round of moves, `--set train.num_envs=64` runs fewer games in parallel, plus
+`--set agent.lr=3e-4` and `--set agent.hidden=256,256`. See §9 of the benchmarks for why the
+update count matters far more than the batch size.
+
+## What a finished run looks like
+
+![training curves](docs/v6_run.png)
+
+5M steps on the 40x30 board. Live score is the mean across all 256 games in flight, which sits
+below the greedy evaluation because most games are caught mid-life rather than at their peak. The
+loss rising while the score is flat is the learner still moving without the policy improving.
 
 ## Layout
 
 ```text
 snakeai/
   config.py    every tunable, as frozen dataclasses with validated cross-field invariants
-  env.py       the MDP: dynamics, 11-dim observation, reward. No torch, no pygame.
+  env.py       the MDP: dynamics, 17-value observation, reward. No torch, no pygame.
   vecenv.py    N independent envs stepped together, with a safe auto-reset contract
   agent.py     Q-network, device-resident replay, the Double DQN update
   train.py     headless training loop. Imports no GUI library; a test enforces that.
@@ -102,10 +118,28 @@ of four:
 | `free_straight/left/right` | how much room each move leads into (1.0 = fits my whole body) |
 | `tail_straight/left/right` | could I still reach my own tail after that move |
 
-The last two groups are what stop the snake trapping itself. `free_*` floods outward from each
-move's landing cell and counts reachable empty cells; `tail_*` asks whether that region still
-connects to the tail. Two moves can both lead into plenty of room while only one stays connected.
-`free_*` alone cannot tell those apart.
+![what the snake sees](docs/observation.png)
+
+The network never sees the board. It gets those seventeen numbers and nothing else, which is why
+the two groups at the bottom carry so much weight.
+
+### How free_* and tail_* are worked out
+
+`free_*` floods outward from the cell each move lands on and counts the empty cells it reaches,
+capped at the snake's own length. `tail_*` asks whether that same region still contains the tail.
+Two moves can both lead into plenty of room while only one stays connected. `free_*` on its own
+cannot tell those apart.
+
+Both animations below are the same board, the same moment, one per move:
+
+| turning right, into a sealed pocket | turning left, onto the open board |
+| --- | --- |
+| ![flood into a pocket](docs/flood_right.gif) | ![flood onto open board](docs/flood_left.gif) |
+| 7 cells reached, `free_right = 0.35`, `tail_right = 0` | 231 cells, `free_left = 1.00`, `tail_left = 1` |
+
+The yellow ring is the tail. Whether the flood swallows it is exactly what `tail_*` reports. The
+snake is 19 long, so a pocket of 7 is a coffin however roomy it looks. Going straight is not shown
+because on this board it walks into the body.
 
 Reward is bounded and **independent of the snake's length**:
 

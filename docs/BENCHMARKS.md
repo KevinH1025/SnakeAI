@@ -1,6 +1,6 @@
 # Benchmarks
 
-All numbers measured on this machine, 2026-09-16. Anything not measured is not stated.
+All numbers measured on this machine, 2026-09-16 to 09-18. Anything not measured is not stated.
 
 **Hardware / software.** NVIDIA GeForce RTX 5080 (Blackwell, `sm_120`, 16 GB), driver 595.71 /
 CUDA 13.2, WSL2 on Linux 6.6, Python 3.12.3, torch 2.14.0+cu130.
@@ -13,7 +13,7 @@ than many-and-small and `play` defaults to CPU.
 
 ## 1. Inference latency vs batch size
 
-Median µs per forward pass, `eval` mode under `no_grad`, for a 2x256 MLP of this shape (the shipped default is 11→128→128→3, which is smaller and faster still).
+Median µs per forward pass, `eval` mode under `no_grad`, for a 2x256 MLP of this shape (the shipped default is 17→128→128→3, which is smaller and faster still).
 
 | batch | CPU (µs) | CUDA (µs) | winner |
 |------:|---------:|----------:|--------|
@@ -117,17 +117,8 @@ chain. Real, but modest: it permitted ~3,700 env steps/s, well above v1's 120/s 
 never the binding constraint. It is gone anyway: v2 preallocates device tensors and samples with
 an on-device `randint` + gather, with no host transfer at all.
 
-Footprint is negligible. 100k transitions of an 11-dim observation is **10.4 MB**, so the
-buffer lives in VRAM without thought. Even 1M transitions would be ~104 MB of 16 GB.
-
----
-
-## Reproducing
-
-```bash
-python -m pytest -q                       # 50 tests, CPU only, a few seconds
-python -m snakeai.train --preset small    # full learning curve in a couple of minutes
-```
+Footprint is negligible. 100k transitions of a 17-wide observation is **13.6 MB**, so the
+buffer lives in VRAM without thought. The shipped 1M capacity is ~136 MB of 16 GB.
 
 ## 8. Compiling the region labelling
 
@@ -155,4 +146,70 @@ complexity.
 
 End to end on the 40x30 board: **3,235 to 14,708 environment steps per second, about 4.5x.**
 With the floods compiled the remaining costs are the gradient updates and the snake dynamics,
-roughly evenly split, and the observation is no longer the bottleneck.
+roughly evenly split. The observation is no longer the bottleneck.
+
+## 9. Where the gradient update time actually goes
+
+§3 said batch size is free on GPU. Measured again on the shipped 17-wide network, it is flat over
+a 32x range:
+
+| batch | ms per update |
+|------:|--------------:|
+| 256   | 1.397 |
+| 1024  | 1.313 |
+| 2048  | 1.269 |
+| 8192  | 1.309 |
+
+One update launches about **72 CUDA kernels at roughly 20 µs each**, which is the entire 1.3 ms.
+The GPU is idle waiting on launches, so the cost is the launch count and nothing else.
+
+That makes the fix the update *count*, not the arithmetic:
+
+| approach | ms per update | gain |
+|---|---:|---|
+| baseline | 1.476 | |
+| fused Adam | 1.356 | 1.09x |
+| `torch.compile(mode="reduce-overhead")` | 1.272 | 1.16x |
+| both | 1.216 | 1.21x |
+| TF32 | 1.360 | **none, 0.99x** |
+
+TF32 and `torch.compile` both disappoint for the same reason: the network is far too small to be
+matmul bound, so making the arithmetic cheaper changes nothing. Compiling only puts the two
+forward passes into CUDA graphs and leaves the backward, the optimiser and the buffer indexing as
+loose launches.
+
+Halving the update count is worth more than all of it. Moving from `8 x 2048` to `2 x 8192`
+trains on the same 16,384 samples per iteration for a quarter of the launches, measured at
+**14,800 to 22,600 env steps/s, 1.53x** on the 40x30 board. It is not free in learning terms,
+since 2 fat gradient steps are not equivalent to 8 thin ones, so it is a trade rather than a win.
+
+## 10. Evaluation is nearly free to make less noisy
+
+Eval runs `eval_episodes` games in parallel, so the cost is the number of loop iterations rather
+than the number of games. Cost of one iteration against how many games run at once:
+
+| games | ms per iteration | vs 20 games |
+|------:|-----------------:|---|
+| 20    | 1.524 | 1.00x |
+| 64    | 1.970 | **1.29x** |
+| 128   | 4.871 | 3.20x |
+| 256   | 7.872 | 5.17x |
+
+Going from 20 games to 64 costs 29% more wall clock for 3.2x the episodes, because a batch of 20
+is pure launch overhead anyway. That matters because eval noise is what decides whether two runs
+can be told apart. At 20 episodes it was 38% of the observed variance between checkpoints, at 64
+it is about 12%.
+
+The thing to watch is the interval, not the cost. A good 40x30 game runs ~9,500 sequential moves,
+so one eval takes about 14 s however many games it runs. At 22,600 steps/s an `eval_every` of
+25,000 fires roughly every second of training, which spends more wall clock evaluating than
+training. The shipped default is 100,000.
+
+---
+
+## Reproducing
+
+```bash
+python -m pytest -q                       # 66 tests, CPU only
+python -m snakeai.train --preset small    # full learning curve in a couple of minutes
+```
