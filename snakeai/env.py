@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .config import EnvConfig, RewardConfig
-from .regions import label_regions, reach_counts
+from .regions import label_regions
 
 
 # --------------------------------------------------------------------------- geometry
@@ -89,9 +89,6 @@ I_FREE_RIGHT = 13
 I_TAIL_STRAIGHT = 14
 I_TAIL_LEFT = 15
 I_TAIL_RIGHT = 16
-I_REACH_STRAIGHT = 17
-I_REACH_LEFT = 18
-I_REACH_RIGHT = 19
 
 OBS_NAMES: tuple[str, ...] = (
     "danger_straight", # 1.0 if going straight kills me
@@ -115,21 +112,10 @@ OBS_NAMES: tuple[str, ...] = (
     "tail_straight", # 1.0 if I could still reach my own tail after going straight
     "tail_left", # 1.0 if I could still reach it after turning left
     "tail_right", # 1.0 if I could still reach it after turning right
-
-    "reach_straight", # how much room there is near me if I go straight
-    "reach_left", # the same for turning left
-    "reach_right", # the same for turning right
 )
 
 OBS_DIM = len(OBS_NAMES)
 
-# How far the reach count looks. free_* and tail_* both read off one whole board labelling, so
-# they hand back the same number for every move whenever those moves open into the same region.
-# Measured on a trained net that is 95% of steps once the snake passes length 200, which is
-# exactly where it starts dying to its own body. Counting cells within a short walk instead
-# stays different between moves in about 9 out of 10 of those states.
-REACH_DEPTH = 10
-REACH_MAX = 2 * REACH_DEPTH * (REACH_DEPTH + 1) + 1 # most cells a walk that long can cover
 
 
 # --------------------------------------------------------------------------- reward
@@ -192,8 +178,6 @@ class SnakeEnv:
         self._label = np.zeros(cells, np.int32)
         self._sizes = np.zeros(cells + 2, np.int32)
         self._stack = np.zeros(cells + 8, np.int32)
-        self._seen = np.zeros(cells, np.uint8) # reach_counts leaves this all zero again
-        self._queue = np.zeros(cells, np.int32)
         self._entries = np.full(3, -1, np.int32)
 
         self.reset()
@@ -539,10 +523,10 @@ class SnakeEnv:
             "crash_cell": self.crash_cell,
         }
 
-    def _regions(self, head: tuple[int, int]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _regions(self, head: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
         """Room available and tail reachability for all three moves, in one pass.
 
-        Returns (counts, tails, reach), each three long, in the order straight, left, right.
+        Returns (counts, tails), each three long, in the order straight, left, right.
         counts and reach are int32, tails is float32.
         """
         width = self.cfg.grid_w
@@ -564,13 +548,8 @@ class SnakeEnv:
 
         budget = len(self.snake) + 1 # room worth having is room for my whole body
 
-        counts, tails = label_regions(self._blocked, self._entries, tail, budget,
-                                      width, height, self._label, self._sizes, self._stack)
-
-        reach = reach_counts(self._blocked, self._entries, REACH_DEPTH,
-                             width, height, self._seen, self._queue)
-
-        return counts, tails, reach
+        return label_regions(self._blocked, self._entries, tail, budget,
+                             width, height, self._label, self._sizes, self._stack)
 
     # -- the observation ----------------------------------------------------
 
@@ -596,7 +575,7 @@ class SnakeEnv:
         obs[I_LENGTH_FRAC] = len(self.snake) / (cfg.grid_w * cfg.grid_h)
         obs[I_HUNGER_FRAC] = min(self.steps_since_food / cfg.max_steps_without_food, 1.0)
 
-        self._observe_space(obs, head) # slots 11-19, room, tail and reach
+        self._observe_space(obs, head) # slots 11-16, room and tail reachability
 
         return obs
 
@@ -635,7 +614,7 @@ class SnakeEnv:
         # Room available down each move and whether the tail is still reachable after it.
         # One pass splits the empty cells into regions, then both answers are lookups.
         # 1.0 room means "enough for my whole body".
-        counts, tails, reach = self._regions(head)
+        counts, tails = self._regions(head)
         budget = len(self.snake) + 1
 
         obs[I_FREE_STRAIGHT] = counts[0] / budget
@@ -645,9 +624,3 @@ class SnakeEnv:
         obs[I_TAIL_STRAIGHT] = tails[0]
         obs[I_TAIL_LEFT] = tails[1]
         obs[I_TAIL_RIGHT] = tails[2]
-
-        # How open each move is close up. free_* above goes flat as soon as the three moves
-        # share a region, so this is what separates them for most of a long game.
-        obs[I_REACH_STRAIGHT] = reach[0] / REACH_MAX
-        obs[I_REACH_LEFT] = reach[1] / REACH_MAX
-        obs[I_REACH_RIGHT] = reach[2] / REACH_MAX

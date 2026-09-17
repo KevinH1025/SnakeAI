@@ -1,22 +1,17 @@
 """Working out which parts of the board the snake can still get to.
 
-Three questions get asked on every single step, for each of the three moves:
+Two questions get asked on every single step, for each of the three moves:
 
   how much room does this move lead into?   ->  free_straight / free_left / free_right
   could I still reach my own tail after it? ->  tail_straight / tail_left / tail_right
-  how open is it just around the corner?    ->  reach_straight / reach_left / reach_right
 
-The first two are answered together. The empty cells get split into connected regions, each
-with an id and a size. Same region as the tail means the tail is reachable. Region size,
-capped at the snake's length, is the room available.
+Both come from one pass. The empty cells get split into connected regions, each with an id and
+a size. Same region as the tail means the tail is reachable. Region size, capped at the snake's
+length, is the room available.
 
-The third needs its own walk. Once two moves open into the same region the first two answers
-give them the same number, so the third counts only what is a short walk away, which stays
-different between them.
-
-If numba is installed both run compiled, which measured about 20x faster than the plain
-Python versions. If it is not, the plain versions run instead and give identical answers.
-There is a test for that.
+If numba is installed the labelling runs compiled, about 20x faster than the plain Python
+version. If it is not, the plain version runs instead and gives identical answers. There is a
+test for that.
 """
 
 from __future__ import annotations
@@ -117,99 +112,12 @@ def _label(blocked, entries, tail, budget, width, height, label, sizes, stack):
     return counts, tails
 
 
-def _reach(blocked, entries, depth, width, height, seen, queue):
-    """How many cells sit within `depth` moves of where each move lands.
-
-    A different question from the one _label answers. Region size says whether a move leads
-    anywhere survivable. Moves that open into the same region all get that same number, which
-    on a mostly empty board is nearly all of them. Counting only what is close by stays
-    different between moves, because it measures how hemmed in each one is right now.
-
-    depth: how many steps out from the entry cell the count reaches.
-    seen, queue: scratch arrays, reused between calls. `seen` is left all zero on the way out,
-        so it never has to be cleared up front.
-
-    Returns three counts, in the order straight, left, right.
-    """
-    counts = np.zeros(3, np.int32)
-
-    for slot in range(3):
-        if entries[slot] < 0:
-            continue # that move is fatal, so it opens nothing up
-
-        queue[0] = entries[slot] # the search starts from the cell this move lands on
-        seen[entries[slot]] = 1 # and never goes back to it
-
-        read = 0 # next cell to pop
-        write = 1 # next free slot, which doubles as the count so far
-
-        ring_left = 1 # cells left to pop at the depth we are on
-        next_ring = 0 # cells found one step further out
-        distance = 0 # rings stepped out from the entry cell so far
-
-        while read < write:
-            here = queue[read] # the cell we are spreading out from
-            read += 1 # it has been popped
-            ring_left -= 1 # one fewer waiting at this depth
-
-            if distance < depth: # at the limit the queue still drains, it just stops growing
-                here_x = here % width # column
-                here_y = here // width # row
-
-                if here_x > 0: # west
-                    west = here - 1
-                    if blocked[west] == 0 and seen[west] == 0:
-                        seen[west] = 1
-                        queue[write] = west
-                        write += 1
-                        next_ring += 1
-
-                if here_x < width - 1: # east
-                    east = here + 1
-                    if blocked[east] == 0 and seen[east] == 0:
-                        seen[east] = 1
-                        queue[write] = east
-                        write += 1
-                        next_ring += 1
-
-                if here_y > 0: # north, y grows downward so this is minus a row
-                    north = here - width
-                    if blocked[north] == 0 and seen[north] == 0:
-                        seen[north] = 1
-                        queue[write] = north
-                        write += 1
-                        next_ring += 1
-
-                if here_y < height - 1: # south
-                    south = here + width
-                    if blocked[south] == 0 and seen[south] == 0:
-                        seen[south] = 1
-                        queue[write] = south
-                        write += 1
-                        next_ring += 1
-
-            if ring_left == 0: # that was the last cell at this depth, so step outward
-                distance += 1 # one further out from the entry cell
-                ring_left = next_ring # what was found out there is the next ring
-                next_ring = 0 # ready to collect the ring after that
-
-        counts[slot] = write # every cell the queue ever held is what is within reach
-
-        for i in range(write):
-            seen[queue[i]] = 0 # hand the next move a clean array
-
-    return counts
-
-
 # ------------------------------------------------------------------- picking an implementation
 
-# The plain Python versions stay as the reference the tests check against.
+# The plain Python version stays as the reference the tests check against.
 label_regions_python = _label # never compiled, whatever numba is doing
-reach_counts_python = _reach # same, the slow but obvious answer
 
 if HAVE_NUMBA:
     label_regions = njit(cache=True)(_label) # compiled on first call, cached on disk after
-    reach_counts = njit(cache=True)(_reach) # same deal, the cache survives restarts
 else:
     label_regions = _label # no numba, so the plain version is the only one there is
-    reach_counts = _reach # likewise
