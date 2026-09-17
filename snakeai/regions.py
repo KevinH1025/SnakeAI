@@ -107,10 +107,94 @@ def _label(blocked, entries, tail, budget, width, height, label, sizes, stack):
     return counts, tails
 
 
-# The plain Python version stays as the reference the tests check against.
+def _reach(blocked, entries, depth, width, height, seen, queue):
+    """How many cells sit within `depth` moves of where each move lands.
+
+    A different question from the one _label answers. Region size says whether a move leads
+    anywhere survivable, which is one number shared by every move whenever they open into the
+    same region, and on a mostly empty board they nearly always do. Counting only what is close
+    by stays different between moves, because it measures how hemmed in each one is right now.
+
+    `seen` and `queue` are scratch arrays, reused between calls. `seen` is left all zero on the
+    way out, so it never has to be cleared up front.
+
+    Returns three counts, in the order straight, left, right.
+    """
+    counts = np.zeros(3, np.int32)
+
+    for slot in range(3):
+        if entries[slot] < 0:
+            continue # that move is fatal, so it opens nothing up
+
+        queue[0] = entries[slot]
+        seen[entries[slot]] = 1
+        read = 0 # next cell to pop
+        write = 1 # next free slot, which doubles as the count so far
+        edge = 1 # cells left to pop at the depth we are on
+        next_edge = 0 # cells found one step further out
+        d = 0
+
+        while read < write:
+            here = queue[read]
+            read += 1
+            edge -= 1
+
+            if d < depth: # at the limit the queue still drains, it just stops growing
+                here_x = here % width
+                here_y = here // width
+
+                if here_x > 0: # west
+                    west = here - 1
+                    if blocked[west] == 0 and seen[west] == 0:
+                        seen[west] = 1
+                        queue[write] = west
+                        write += 1
+                        next_edge += 1
+
+                if here_x < width - 1: # east
+                    east = here + 1
+                    if blocked[east] == 0 and seen[east] == 0:
+                        seen[east] = 1
+                        queue[write] = east
+                        write += 1
+                        next_edge += 1
+
+                if here_y > 0: # north, y grows downward so this is minus a row
+                    north = here - width
+                    if blocked[north] == 0 and seen[north] == 0:
+                        seen[north] = 1
+                        queue[write] = north
+                        write += 1
+                        next_edge += 1
+
+                if here_y < height - 1: # south
+                    south = here + width
+                    if blocked[south] == 0 and seen[south] == 0:
+                        seen[south] = 1
+                        queue[write] = south
+                        write += 1
+                        next_edge += 1
+
+            if edge == 0: # that was the last cell at this depth, so step outward
+                d += 1
+                edge = next_edge
+                next_edge = 0
+
+        counts[slot] = write
+
+        for i in range(write):
+            seen[queue[i]] = 0 # hand the next move a clean array
+
+    return counts
+
+
+# The plain Python versions stay as the reference the tests check against.
 label_regions_python = _label
+reach_counts_python = _reach
 
 if HAVE_NUMBA:
     label_regions = njit(cache=True)(_label)
+    reach_counts = njit(cache=True)(_reach)
 else:
     label_regions = _label
+    reach_counts = _reach
