@@ -5,3 +5,7 @@ numpy>=1.26
 pygame>=2.5
 matplotlib>=3.8
 pytest>=8.0
+
+# optional. If installed, the region labelling in the environment runs compiled,
+# which is roughly 20x faster. Everything works without it, just slower.
+numba>=0.59

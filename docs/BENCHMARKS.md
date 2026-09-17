@@ -128,3 +128,31 @@ buffer lives in VRAM without thought. Even 1M transitions would be ~104 MB of 16
 python -m pytest -q                       # 50 tests, CPU only, a few seconds
 python -m snakeai.train --preset small    # full learning curve in a couple of minutes
 ```
+
+## 8. Compiling the region labelling
+
+The environment works out how much room each move leads into and whether the tail is still
+reachable. Both come from splitting the empty cells into connected regions. In pure Python that
+was 57 ms per 256 games and 73% of a training iteration.
+
+Measured on 256 real boards with snakes averaging 40 cells, every variant correct:
+
+| labelling of the empty cells | ms per 256 games |
+| --- | ---: |
+| pure Python, two separate floods | 52.8 |
+| compiled, two separate floods | 2.25 |
+| compiled, one labelling pass | 2.56 |
+| compiled, one merged flood | 2.55 |
+
+Once compiled the algorithm barely matters, so the labelling pass was chosen for being the
+simplest: no budget inside the walk, no early exit, no reuse shortcut and no state carried
+between calls. Both features become lookups against the same labels, so they cannot disagree.
+
+Threads were measured too. The labelling itself scales nearly linearly, 1.29 ms on one thread to
+0.12 ms on 24, but about 0.9 ms of surrounding Python does not parallelise and dominates almost
+immediately. Ten threads bought roughly 8% on the whole iteration, so it was not worth the
+complexity.
+
+End to end on the 40x30 board: **3,235 to 14,708 environment steps per second, about 4.5x.**
+With the floods compiled the remaining costs are the gradient updates and the snake dynamics,
+roughly evenly split, and the observation is no longer the bottleneck.

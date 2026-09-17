@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .config import EnvConfig, RewardConfig
+from .regions import label_regions
 
 
 # --------------------------------------------------------------------------- geometry
@@ -152,6 +153,14 @@ class SnakeEnv:
         self.rng = np.random.default_rng(seed) # every random choice comes from here
         self._needs_reset = True
 
+        # Scratch space for the region labelling, allocated once and reused every step.
+        cells = cfg.grid_w * cfg.grid_h
+        self._blocked = np.zeros(cells, np.uint8)
+        self._label = np.zeros(cells, np.int32)
+        self._sizes = np.zeros(cells + 2, np.int32)
+        self._stack = np.zeros(cells + 8, np.int32)
+        self._entries = np.full(3, -1, np.int32)
+
         self.reset()
 
     # -- starting and finishing ---------------------------------------------
@@ -243,6 +252,10 @@ class SnakeEnv:
         hit_wall, hit_self = self._fatal(nxt)
 
         return hit_wall or hit_self
+
+    # The three methods below are the original flood implementation. observe() no longer calls
+    # them, _regions() does the same job in one labelling pass. They are kept because the tests
+    # check the labelling against them, so a change to one that breaks the other fails loudly.
 
     def _blocked_cells(self) -> bytearray:
         """A flat width*height map: 1 where the snake's body is, 0 where it is free.
@@ -513,6 +526,40 @@ class SnakeEnv:
             "crash_cell": self.crash_cell,
         }
 
+    def _regions(self, head: tuple[int, int]):
+        """Room available and tail reachability for all three moves, in one pass.
+
+        Returns (counts, tails), each three long, in the order straight, left, right.
+        """
+        width = self.cfg.grid_w
+        height = self.cfg.grid_h
+
+        # Mark the body. The tail is left clear because it steps out of the way as the head
+        # arrives, which is what _fatal() already assumes and these two have to agree.
+        self._blocked[:] = 0
+        for body_x, body_y in self.snake:
+            self._blocked[body_x + body_y * width] = 1
+
+        tail_x, tail_y = self.snake[-1]
+        tail = tail_x + tail_y * width
+        self._blocked[tail] = 0
+
+        # Where each move would put the head, or -1 if that move cannot be made at all.
+        for slot, action in enumerate((ACTION_STRAIGHT, ACTION_LEFT, ACTION_RIGHT)):
+            step = DIRECTIONS[turn(self.heading, action)]
+            cell_x = head[0] + step[0]
+            cell_y = head[1] + step[1]
+
+            if not (0 <= cell_x < width and 0 <= cell_y < height):
+                self._entries[slot] = -1 # off the board
+            elif self._blocked[cell_x + cell_y * width]:
+                self._entries[slot] = -1 # into the body
+            else:
+                self._entries[slot] = cell_x + cell_y * width
+
+        return label_regions(self._blocked, self._entries, tail, len(self.snake) + 1,
+                             width, height, self._label, self._sizes, self._stack)
+
     # -- the observation ----------------------------------------------------
 
     def _dist_norm(self, head: tuple[int, int], food: tuple[int, int] | None) -> float:
@@ -558,23 +605,18 @@ class SnakeEnv:
         obs[I_LENGTH_FRAC] = len(self.snake) / (cfg.grid_w * cfg.grid_h)
         obs[I_HUNGER_FRAC] = min(self.steps_since_food / cfg.max_steps_without_food, 1.0)
 
-        # Both of the next two features walk the board, so build the obstacle map once and share it.
-        blocked = self._blocked_cells()
-
-        # How much room does each move lead into? 1.0 means "enough for my whole body".
+        # Room available down each move, and whether the tail is still reachable after it. One
+        # pass splits the empty cells into regions, then both answers are lookups. 1.0 room means
+        # "enough for my whole body".
+        counts, tails = self._regions(head)
         budget = len(self.snake) + 1
-        free_straight, free_left, free_right = self._free_spaces(head, budget, blocked)
 
-        obs[I_FREE_STRAIGHT] = free_straight / budget
-        obs[I_FREE_LEFT] = free_left / budget
-        obs[I_FREE_RIGHT] = free_right / budget
+        obs[I_FREE_STRAIGHT] = counts[0] / budget
+        obs[I_FREE_LEFT] = counts[1] / budget
+        obs[I_FREE_RIGHT] = counts[2] / budget
 
-        # Could I still get back to my own tail afterwards? This is what tells a roomy dead end
-        # apart from a roomy corridor that stays connected.
-        tail_straight, tail_left, tail_right = self._tail_reachable(head, blocked)
-
-        obs[I_TAIL_STRAIGHT] = tail_straight
-        obs[I_TAIL_LEFT] = tail_left
-        obs[I_TAIL_RIGHT] = tail_right
+        obs[I_TAIL_STRAIGHT] = tails[0]
+        obs[I_TAIL_LEFT] = tails[1]
+        obs[I_TAIL_RIGHT] = tails[2]
 
         return obs
