@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Environments
+.venv/
+venv/
+
+# Training artifacts
+runs/
+*.pth
+*.pkl
+*.npz
+!model/Best_DQN_Model_64_512_94_776k/*.pth
+!model/Best_DQN_Model_64_512_94_776k/*.pkl
+
+# local design notes, deliberately not published
+docs/DESIGN.md
