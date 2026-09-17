@@ -189,3 +189,30 @@ def test_save_buffer_false_writes_no_replay_file(tmp_path):
     run_training(short_cfg(tmp_path, **{"train.save_buffer": "false"}), quiet=True)
     assert (tmp_path / "ckpt.pt").exists()
     assert not replay_path(tmp_path / "ckpt.pt").exists()
+
+
+def test_live_scores_count_games_still_running(cfg):
+    """The record must include games in progress, not only the ones that died.
+
+    A strong agent plays very long games, so counting only finished episodes samples the games
+    that died early, which are exactly the bad ones.
+    """
+    from snakeai.vecenv import VecSnakeEnv
+
+    vec = VecSnakeEnv(cfg.env, n_envs=4, seed=0)
+    vec.envs[0].score = 90 # a game doing well, nowhere near finishing
+    vec.envs[1].score = 10
+    vec.envs[2].score = 0
+    vec.envs[3].score = 0
+
+    mean, best = vec.live_scores()
+    assert best == 90.0, "the best live game must be visible without waiting for it to end"
+    assert mean == 25.0, "the mean is over all games, not just the finished ones"
+    assert vec.best_live_score() == 90.0
+
+
+def test_metrics_header_carries_the_live_columns(tmp_path):
+    run_training(short_cfg(tmp_path), quiet=True)
+    header = (tmp_path / "metrics.csv").read_text().splitlines()[0].split(",")
+    for column in ("step", "episodes", "score_mean", "score_max", "best_score"):
+        assert column in header, f"missing {column}"

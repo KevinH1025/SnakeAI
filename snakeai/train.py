@@ -121,7 +121,7 @@ def run_training(cfg: Config, resume: str | None = None, quiet: bool = False) ->
     writer = csv.writer(metrics_file)
     if new_file:
         writer.writerow(["step", "episodes", "epsilon", "loss", "return_mean",
-                         "score_mean", "score_max", "steps_per_sec", "wall_s"])
+                         "score_mean", "score_max", "best_score", "steps_per_sec", "wall_s"])
 
     # How to spend the learning we owe: a few big gradient steps rather than many small ones,
     # which is much faster on a GPU and adds up to the same amount of learning.
@@ -139,7 +139,8 @@ def run_training(cfg: Config, resume: str | None = None, quiet: bool = False) ->
         print(f"updates  : {planned_updates} x batch {planned_batch} per iteration "
               f"({cfg.agent.batch_size / cfg.agent.train_every:.0f} gradient samples per transition)")
 
-    loss_w, ret_w, score_w = Window(200), Window(200), Window(200)
+    loss_w = Window(200) # loss is per update, so a window still makes sense here
+    ret_w = Window(200) # episode returns, only updated when a game ends
     reasons: Counter[str] = Counter()
     episodes = 0
     since_update = 0
@@ -178,14 +179,18 @@ def run_training(cfg: Config, resume: str | None = None, quiet: bool = False) ->
         )
 
         step += n_envs # one transition per env per iteration
+
         for info in finished: # episodes that ended on this step
             episodes += 1
             ret_w.add(info["return"])
-            score_w.add(info["score"])
             reasons[info["reason"]] += 1 # wall / self / starved / won histogram
-            if info["score"] > best_score:
-                best_score = info["score"] # new record -> snapshot the weights
-                save_checkpoint(run_dir / "best.pt", agent, cfg, step, best_score, include_buffer=False)
+
+        # The record has to include games that are still running. A good agent plays very long
+        # episodes, so waiting for one to end means the best games are never counted at all.
+        top_live = vec.best_live_score()
+        if top_live > best_score:
+            best_score = top_live # new record, snapshot the weights
+            save_checkpoint(run_dir / "best.pt", agent, cfg, step, best_score, include_buffer=False)
 
         # 5. Learn. We owe one update's worth of learning per `train_every` moves collected and
         #    n_envs moves just arrived, so the debt builds fast. update_plan() decides how to spend
@@ -203,15 +208,16 @@ def run_training(cfg: Config, resume: str | None = None, quiet: bool = False) ->
         if step >= next_log:
             now = time.perf_counter()
             sps = (step - last_report_step) / max(now - last_report_time, 1e-9) # since last log, not since start
+            live_mean, live_max = vec.live_scores() # all n_envs games as they stand now
             writer.writerow([step, episodes, round(epsilon, 5), round(loss_w.mean, 6),
-                             round(ret_w.mean, 4), round(score_w.mean, 4),
-                             max(score_w.values) if len(score_w) else 0,
-                             round(sps, 1), round(now - started, 2)])
+                             round(ret_w.mean, 4), round(live_mean, 4), round(live_max, 1),
+                             round(best_score, 1), round(sps, 1), round(now - started, 2)])
             metrics_file.flush()
+
             if not quiet:
                 print(f"  step {step:>9,}  eps {epsilon:.3f}  loss {loss_w.mean:8.5f}  "
-                      f"score {score_w.mean:6.2f}  best {best_score:5.0f}  "
-                      f"{sps:>9,.0f} steps/s")
+                      f"score {live_mean:6.1f}  top {live_max:5.0f}  best {best_score:5.0f}  "
+                      f"eps_done {episodes:>6,}  {sps:>9,.0f} steps/s")
             last_report_step, last_report_time = step, now
             while next_log <= step:  # skip ahead; never crawl one interval per iteration
                 next_log += cfg.train.log_every
@@ -239,7 +245,7 @@ def run_training(cfg: Config, resume: str | None = None, quiet: bool = False) ->
         "steps": step,
         "episodes": episodes,
         "best_score": best_score,
-        "score_mean_last200": score_w.mean,
+        "score_mean_live": vec.live_scores()[0],
         "elapsed_s": round(elapsed, 2),
         "steps_per_sec": round((step - start_step) / max(elapsed, 1e-9), 1),
         "reasons": dict(reasons),

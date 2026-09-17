@@ -81,3 +81,30 @@ class VecSnakeEnv:
                 self.current_obs[i] = obs # still alive, so next_obs and current_obs agree
 
         return self._next_obs, self._rewards, self._terminated, self._truncated, finished
+
+    def live_scores(self) -> tuple[float, float]:
+        """The mean and best score across every game as it stands right now.
+
+        Counts games still in progress, unlike anything built from finished episodes. A strong
+        agent plays very long games, so waiting for them to end biases the numbers towards the
+        games that died early, which are exactly the bad ones.
+        """
+        best = 0
+        total = 0
+
+        for env in self.envs:
+            total += env.score
+            if env.score > best:
+                best = env.score
+
+        return total / self.n_envs, float(best)
+
+    def best_live_score(self) -> float:
+        """The highest score any game is currently sitting on."""
+        best = 0
+
+        for env in self.envs:
+            if env.score > best:
+                best = env.score
+
+        return float(best)

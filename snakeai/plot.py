@@ -45,9 +45,11 @@ def main(argv: list[str] | None = None) -> None:
     fig, axes = plt.subplots(2, 2, figsize=(12, 7))
     fig.suptitle(f"SnakeAI - {args.run_dir}")
 
-    axes[0][0].plot(m["step"], m["score_mean"], label="mean score (last 200 eps)")
+    axes[0][0].plot(m["step"], m["score_mean"], label="mean score, live games")
     if "score_max" in m:
-        axes[0][0].plot(m["step"], m["score_max"], alpha=0.4, label="best in window")
+        axes[0][0].plot(m["step"], m["score_max"], alpha=0.4, label="best live game")
+    if "best_score" in m:
+        axes[0][0].plot(m["step"], m["best_score"], alpha=0.4, label="best ever")
     axes[0][0].set_xlabel("environment steps")
     axes[0][0].set_ylabel("score")
     axes[0][0].legend()
