@@ -86,7 +86,7 @@ class TrainConfig:
     eval_seed: int = 12_345 # fixed, so checkpoints face identical food sequences
     eval_max_steps: int = 5_000 # give up on an episode after this many steps
     save_every: int = 25_000 # write ckpt.pt
-    save_buffer: bool = True # include replay in ckpt.pt (needed for an exact resume)
+    save_buffer: bool = False # include replay in ckpt.pt (needed for an exact resume)
     run_dir: str = "runs/dev"
     seed: int = 0
     device: str = "auto" # auto | cpu | cuda
@@ -186,16 +186,17 @@ PRESETS: dict[str, dict[str, Any]] = {
     "big": {
         "env.grid_w": 40,
         "env.grid_h": 30,
-        # At length 100+ the snake legitimately needs many steps to route around its own body to
-        # reach food; a 200-step clock was truncating ~30% of good evaluation episodes. The step
-        # cost drops to keep |step| * clock <= food (invariant 3 in validate()).
-        "env.max_steps_without_food": 400,
-        "env.rewards.step": -0.0025,
+        # A long snake needs many moves to route around its own body to reach food, so the clock
+        # has to be generous. The step cost then has to come down to match, because a full clock
+        # must never cost more than one food is worth. validate() checks that pair.
+        "env.max_steps_without_food": 800,
+        "env.rewards.step": -0.00125,
         "agent.epsilon_decay_steps": 300_000,
         "train.total_steps": 5_000_000,
-        # Good episodes now run well past 5,000 steps and an unfinished episode is a measurement
-        # we simply do not get.
+        # Good episodes run for many thousands of steps, and one that hits the cap is a
+        # measurement we simply do not get.
         "train.eval_max_steps": 30_000,
+        "train.save_every": 10_000,
     },
 
     # A full learning curve in a few minutes. Used by the tests and for hand iteration.
