@@ -50,7 +50,6 @@ python -m snakeai.train --run-dir runs/dev --set train.total_steps=3000000
 # the ORIGINAL 40x30 board, to compare against v1's best of 94
 python -m snakeai.train --preset big --run-dir runs/big \
     --set train.total_steps=6000000 \
-    --set agent.max_updates_per_iter=8 \
     --set train.save_every=500000
 
 # watch it play while it trains, in a second terminal. Costs the trainer nothing.
@@ -69,9 +68,9 @@ On a 5080 the 40x30 board runs at roughly 2,700 environment steps per second, so
 about 40 minutes. Throughput falls as the snake grows, because the flood fills that build the
 observation have more board to cross, so treat that as a lower bound rather than a promise.
 
-Useful knobs: `--set agent.max_updates_per_iter=8` for more gradient steps from the same data,
-`--set train.num_envs=64` for fewer parallel games, `--set agent.lr=3e-4` and
-`--set agent.hidden=256,256`.
+Useful knobs: `--set agent.updates_per_iter=8` and `--set agent.batch_size=2048` control how
+much it learns per round of moves, `--set train.num_envs=64` runs fewer games in parallel, plus
+`--set agent.lr=3e-4` and `--set agent.hidden=256,256`.
 
 ## Layout
 

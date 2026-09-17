@@ -229,11 +229,9 @@ class DQNAgent:
 
         self.updates = 0 # how many gradient steps we have taken
 
-        # The target copy happens every so many gradient SAMPLES, not every so many updates,
-        # because train.py makes update count depend on num_envs.
-        self.samples = 0
-        self._samples_at_last_sync = 0
-        self._sync_every_samples = cfg.target_sync_steps * cfg.batch_size
+        # The training loop decides when to call sync_target(), counted in moves played, so
+        # target staleness cannot drift when num_envs changes.
+        self.samples = 0 # gradient samples seen, for reporting only
 
     # -- choosing moves -----------------------------------------------------
 
@@ -325,10 +323,6 @@ class DQNAgent:
         self.updates += 1
         self.samples += batch_size
 
-        if self.samples - self._samples_at_last_sync >= self._sync_every_samples:
-            self.sync_target()
-            self._samples_at_last_sync = self.samples
-
         return float(loss.detach())
 
     def sync_target(self) -> None:
@@ -346,7 +340,6 @@ class DQNAgent:
             "optimizer": self.optimizer.state_dict(), # needed for an exact resume
             "updates": self.updates,
             "samples": self.samples,
-            "samples_at_last_sync": self._samples_at_last_sync,
             "rng": self.rng.bit_generator.state,
         }
 
@@ -366,7 +359,6 @@ class DQNAgent:
 
         self.updates = int(state.get("updates", 0))
         self.samples = int(state.get("samples", 0))
-        self._samples_at_last_sync = int(state.get("samples_at_last_sync", self.samples))
 
         if "rng" in state:
             self.rng.bit_generator.state = state["rng"]

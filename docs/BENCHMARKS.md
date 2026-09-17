@@ -59,9 +59,8 @@ Forward + backward + optimizer step, median µs.
 CUDA is again flat: **a batch-16384 update costs the same wall-clock as a batch-256 update.** On
 GPU, batch size is free and update *count* is what costs.
 
-**Consequence:** the training loop holds the replay ratio fixed (`batch_size / train_every`
-gradient samples per transition) but spends the budget on at most `max_updates_per_iter` large
-updates instead of many small ones. Getting this wrong was measurable: an early version did 64
+**Consequence:** the training loop runs `updates_per_iter` gradient steps of `batch_size` each
+after every round of moves. Few large updates cost far less than many small ones. Getting this wrong was measurable: an early version did 64
 separate batch-128 updates per iteration and ran at **2,508 steps/s**; batching them into 2 ×
 batch-4096 took the identical workload to **26,758 steps/s**, a 10.7x gain.
 

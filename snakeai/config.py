@@ -60,14 +60,13 @@ class AgentConfig:
     hidden: tuple[int, ...] = (128, 128) # one Linear+ReLU per entry
     lr: float = 1e-3
     gamma: float = 0.99 # discount factor
-    batch_size: int = 128 # samples per gradient update (train.py scales this up)
+    # Every iteration the loop plays num_envs moves, then does updates_per_iter gradient steps
+    # of batch_size samples each. Nothing here is scaled or derived, what you set is what runs.
+    updates_per_iter: int = 8 # gradient steps after each round of moves
+    batch_size: int = 2_048 # past moves each gradient step learns from
     buffer_capacity: int = 1_000_000 # replay size, ~125 MB at this obs width on the GPU
-    learning_starts: int = 1_000 # collect this many transitions before training
-    train_every: int = 4 # one update per 4 transitions -> 32 samples/transition
-    # Most gradient steps per iteration. Doing fewer, bigger steps is much faster on a GPU;
-    # train.py grows the batch to keep the same amount of learning.
-    max_updates_per_iter: int = 2
-    target_sync_steps: int = 1_000 # in UPDATES-worth of samples, see DQNAgent.learn()
+    learning_starts: int = 20_000 # collect this many moves before training starts
+    target_sync_steps: int = 4_000 # copy the online net into the target net every N moves played
     grad_clip: float = 10.0 # max gradient norm
     epsilon_start: float = 1.0 # fully random at the start
     epsilon_final: float = 0.01 # floor. 0.05 killed long snakes: 1 random move per 20 steps
@@ -167,10 +166,8 @@ class Config:
                 f"env.rewards.food={r.food}; shaping would rival the food signal"
             )
 
-        if a.max_updates_per_iter < 1:
-            raise ValueError(
-                f"agent.max_updates_per_iter={a.max_updates_per_iter} must be >= 1"
-            )
+        if a.updates_per_iter < 1:
+            raise ValueError(f"agent.updates_per_iter={a.updates_per_iter} must be >= 1")
         if self.train.num_envs < 0:
             raise ValueError(f"train.num_envs={self.train.num_envs} must be >= 0 (0 means auto)")
         if self.train.device not in ("auto", "cpu", "cuda"):
@@ -208,7 +205,8 @@ PRESETS: dict[str, dict[str, Any]] = {
         "env.max_steps_without_food": 40,
         "env.rewards.step": -0.02,
         "agent.epsilon_decay_steps": 5_000,
-        "agent.learning_starts": 500,
+        "agent.learning_starts": 2_000,
+        "agent.batch_size": 512,
         "agent.buffer_capacity": 20_000,
         "agent.hidden": (64, 64),
         "train.total_steps": 60_000,

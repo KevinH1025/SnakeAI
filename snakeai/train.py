@@ -123,32 +123,20 @@ def run_training(cfg: Config, resume: str | None = None, quiet: bool = False) ->
         writer.writerow(["step", "episodes", "epsilon", "loss", "return_mean",
                          "score_mean", "score_max", "best_score", "steps_per_sec", "wall_s"])
 
-    # How to spend the learning we owe: a few big gradient steps rather than many small ones,
-    # which is much faster on a GPU and adds up to the same amount of learning.
-    def update_plan(owed: int) -> tuple[int, int]:
-        n_up = min(cfg.agent.max_updates_per_iter, owed)
-        return n_up, max(cfg.agent.batch_size, int(round(owed * cfg.agent.batch_size / n_up)))
-
-    planned_updates, planned_batch = update_plan(max(1, n_envs // cfg.agent.train_every))
-    if planned_batch > cfg.agent.buffer_capacity:
-        raise ValueError(
-            f"effective batch {planned_batch} (batch_size={cfg.agent.batch_size} scaled for "
-            f"num_envs={n_envs}) exceeds agent.buffer_capacity={cfg.agent.buffer_capacity}"
-        )
     if not quiet:
-        print(f"updates  : {planned_updates} x batch {planned_batch} per iteration "
-              f"({cfg.agent.batch_size / cfg.agent.train_every:.0f} gradient samples per transition)")
+        print(f"updates  : {cfg.agent.updates_per_iter} x batch {cfg.agent.batch_size:,} "
+              f"after every {n_envs} moves played")
 
     loss_w = Window(200) # loss is per update, so a window still makes sense here
     ret_w = Window(200) # episode returns, only updated when a game ends
     reasons: Counter[str] = Counter()
     episodes = 0
-    since_update = 0
     # When the next log / eval / save is due, counted from where this run actually starts.
     def next_due(interval: int) -> int:
         return ((step // interval) + 1) * interval # first multiple strictly after `step`
 
     next_log, next_eval = next_due(cfg.train.log_every), next_due(cfg.train.eval_every)
+    next_sync = next_due(cfg.agent.target_sync_steps)
     next_save = next_due(cfg.train.save_every)
     start_step = step
     started = time.perf_counter()
@@ -192,18 +180,18 @@ def run_training(cfg: Config, resume: str | None = None, quiet: bool = False) ->
             best_score = top_live # new record, snapshot the weights
             save_checkpoint(run_dir / "best.pt", agent, cfg, step, best_score, include_buffer=False)
 
-        # 5. Learn. We owe one update's worth of learning per `train_every` moves collected and
-        #    n_envs moves just arrived, so the debt builds fast. update_plan() decides how to spend
-        #    it: a few big gradient steps instead of many small ones.
-        since_update += n_envs
-        owed = since_update // cfg.agent.train_every # how much learning we now owe
-        if owed > 0:
-            n_up, eff_batch = update_plan(int(owed)) # cap the count, grow the batch instead
-            for _ in range(n_up):
-                loss = agent.learn(batch_size=eff_batch)
-                if loss is not None:
-                    loss_w.add(loss) # None until the buffer has enough to sample
-            since_update -= owed * cfg.agent.train_every # keep the remainder, never drop it
+        # 5. Learn. A fixed number of gradient steps after every round of moves.
+        for _ in range(cfg.agent.updates_per_iter):
+            loss = agent.learn()
+            if loss is not None:
+                loss_w.add(loss) # None until the buffer has enough to sample
+
+        # 6. Refresh the frozen target network every target_sync_steps moves played. Counted in
+        #    moves, not updates, so changing num_envs cannot quietly change how stale it gets.
+        if step >= next_sync:
+            agent.sync_target()
+            while next_sync <= step:
+                next_sync += cfg.agent.target_sync_steps
 
         if step >= next_log:
             now = time.perf_counter()

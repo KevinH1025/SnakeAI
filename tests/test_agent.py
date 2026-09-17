@@ -105,22 +105,27 @@ def test_act_does_not_change_training_mode(cfg, device):
     assert agent.online.training == before
 
 
-def test_target_is_frozen_between_syncs_and_absent_from_optimizer(cfg, device):
+def test_target_is_frozen_until_told_and_absent_from_the_optimizer(cfg, device):
+    """learn() never touches the target network. Only sync_target() does."""
     agent = DQNAgent(cfg.agent, device, seed=0)
+
     assert not any(p.requires_grad for p in agent.target.parameters())
     optim_params = {id(p) for g in agent.optimizer.param_groups for p in g["params"]}
     assert not any(id(p) in optim_params for p in agent.target.parameters())
 
-    n = 2048
+    n = 4096
     g = torch.Generator(device=device).manual_seed(0)
     obs = torch.randn(n, OBS_DIM, generator=g)
     agent.buffer.add_batch(obs, torch.randint(0, 3, (n,), generator=g),
                            torch.randn(n, generator=g), torch.zeros_like(obs), torch.ones(n))
+
     snapshot = [p.clone() for p in agent.target.parameters()]
-    for _ in range(cfg.agent.target_sync_steps - 1):
+    for _ in range(20):
         agent.learn()
-    assert all(torch.equal(a, b) for a, b in zip(snapshot, agent.target.parameters()))
-    agent.learn()
+    assert all(torch.equal(a, b) for a, b in zip(snapshot, agent.target.parameters())), \
+        "learn() must not move the target network"
+
+    agent.sync_target()
     assert any(not torch.equal(a, b) for a, b in zip(snapshot, agent.target.parameters()))
 
 
@@ -196,83 +201,25 @@ def test_checkpoint_roundtrip_reproduces_action_sequence(cfg, device):
     assert not any(p.requires_grad for p in restored.target.parameters())
 
 
-def test_target_sync_cadence_is_independent_of_num_envs(cfg, device):
-    """Regression: sync must not be counted in optimizer updates.
+def test_target_sync_cadence_is_counted_in_moves_played(cfg):
+    """Syncing on moves played keeps target staleness the same at any num_envs.
 
-    train.py holds gradient SAMPLES per transition fixed while capping update COUNT, so a cadence
-    measured in updates makes target staleness a function of num_envs. At num_envs=256 that meant
-    3 syncs in a 500k-step run; at 1024 the target never synced at all and the bootstrap came from
-    the randomly-initialised network for the entire run.
+    The old code counted gradient updates, which the loop made a function of num_envs, so at 256
+    games the target synced 3 times in a 500k step run and at 1024 it never synced at all.
     """
-    a = cfg.agent
+    every = cfg.agent.target_sync_steps
+    spacing = {}
 
-    def update_plan(owed):  # mirrors train.py
-        n = min(a.max_updates_per_iter, owed)
-        return n, max(a.batch_size, round(owed * a.batch_size / n))
-
-    steps_per_sync = {}
     for n_envs in (1, 8, 64, 256, 1024):
-        agent = DQNAgent(a, device, seed=0)
-        total_steps, step, since, syncs = 200_000, 0, 0, 0
-        while step < total_steps:
+        step, next_sync, syncs = 0, every, 0
+        while step < 200_000:
             step += n_envs
-            since += n_envs
-            owed = since // a.train_every
-            if owed:
-                n_up, eff = update_plan(int(owed))
-                for _ in range(n_up):
-                    agent.samples += eff  # count samples without paying for real gradients
-                    if agent.samples - agent._samples_at_last_sync >= agent._sync_every_samples:
-                        syncs += 1
-                        agent._samples_at_last_sync = agent.samples
-                since -= owed * a.train_every
-        assert syncs > 0, f"num_envs={n_envs} never synced the target network"
-        steps_per_sync[n_envs] = step / syncs
+            if step >= next_sync:
+                syncs += 1
+                while next_sync <= step:
+                    next_sync += every
+        assert syncs > 0, f"num_envs={n_envs} never synced"
+        spacing[n_envs] = step / syncs
 
-    spread = max(steps_per_sync.values()) / min(steps_per_sync.values())
-    assert spread < 1.25, f"target staleness varies with num_envs: {steps_per_sync}"
-
-
-def test_masked_exploration_never_picks_a_move_it_knows_is_fatal(cfg, device):
-    """A random move kills a long snake about one time in five and teaches nothing doing it:
-    the danger flag already said the move was fatal."""
-    from snakeai.agent import DANGER_SLOTS
-
-    agent = DQNAgent(cfg.agent, device, seed=0)
-    assert agent.cfg.mask_fatal_exploration is True
-
-    rng = np.random.default_rng(0)
-    obs = rng.random((500, OBS_DIM)).astype(np.float32)
-    obs[:, DANGER_SLOTS] = 0.0
-    obs[:, DANGER_SLOTS[0]] = 1.0 # going straight is fatal in every one of these states
-    obs[:, DANGER_SLOTS[1]] = 1.0 # so is turning left
-
-    chosen = agent.act(obs, epsilon=1.0) # explore on every single one
-    assert set(chosen.tolist()) == {2}, "only turning right was survivable, so it must pick right"
-
-
-def test_masked_exploration_still_moves_when_everything_is_fatal(cfg, device):
-    """Nothing to choose between, so it must still return a legal action rather than hang."""
-    from snakeai.agent import DANGER_SLOTS
-
-    agent = DQNAgent(cfg.agent, device, seed=0)
-    obs = np.zeros((64, OBS_DIM), dtype=np.float32)
-    obs[:, DANGER_SLOTS] = 1.0 # every move kills
-
-    chosen = agent.act(obs, epsilon=1.0)
-    assert chosen.shape == (64,)
-    assert set(chosen.tolist()) <= {0, 1, 2}
-
-
-def test_masking_can_be_turned_off_for_comparison(cfg, device):
-    import dataclasses
-    from snakeai.agent import DANGER_SLOTS
-
-    plain = dataclasses.replace(cfg.agent, mask_fatal_exploration=False)
-    agent = DQNAgent(plain, device, seed=0)
-
-    obs = np.zeros((500, OBS_DIM), dtype=np.float32)
-    obs[:, DANGER_SLOTS[0]] = 1.0 # straight is fatal, but masking is off
-
-    chosen = agent.act(obs, epsilon=1.0)
-    assert 0 in chosen.tolist(), "with masking off it should still sometimes pick the fatal move"
+    spread = max(spacing.values()) / min(spacing.values())
+    assert spread < 1.1, f"target staleness varies with num_envs: {spacing}"

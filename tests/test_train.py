@@ -37,7 +37,7 @@ def short_cfg(tmp_path, **extra):
         "train.device=cpu", "train.num_envs=4", "train.total_steps=3000",
         "train.log_every=1000", "train.eval_every=2000", "train.save_every=2000",
         "train.eval_episodes=4", "train.eval_max_steps=200",
-        "agent.learning_starts=128", "agent.buffer_capacity=5000",
+        "agent.batch_size=64", "agent.learning_starts=128", "agent.buffer_capacity=5000",
         "agent.hidden=32,32", "agent.target_sync_steps=50",
         f"train.run_dir={tmp_path}",
     ]

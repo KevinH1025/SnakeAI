@@ -10,7 +10,7 @@ def cfg():
     return apply_overrides(preset("small"), [
         "train.device=cpu",
         "train.num_envs=4",
-        "agent.learning_starts=128",
+        "agent.batch_size=64", "agent.learning_starts=128",
         "agent.buffer_capacity=5000",
         "agent.hidden=32,32",
     ])
