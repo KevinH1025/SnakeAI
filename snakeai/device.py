@@ -25,10 +25,8 @@ def resolve_device(spec: str = "auto") -> torch.device:
 def assert_kernels_available(device: torch.device) -> None:
     """Fail loudly if this torch build has no kernels for this GPU.
 
-    A wheel that predates the card (cu121/cu124 on Blackwell, say) still reports
-    ``cuda.is_available() == True``. You then get either a hard "no kernel image is available"
-    at the first matmul or, worse, a silent multi second PTX JIT to the new arch that works
-    but is slow and easy to mistake for "the GPU just isn't helping".
+    A wheel older than the card still reports cuda.is_available() as True, then either dies at
+    the first matmul or silently JITs and runs slow.
     """
     if device.type != "cuda":
         return

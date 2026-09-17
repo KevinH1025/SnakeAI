@@ -248,6 +248,7 @@ def run_training(cfg: Config, resume: str | None = None, quiet: bool = False) ->
         "n_envs": n_envs,
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+
     if not quiet:
         print(f"\ndone: {step:,} steps ({step - start_step:,} this session), {episodes:,} episodes, "
               f"best {best_score:.0f}, {summary['steps_per_sec']:,.0f} steps/s over {elapsed:.1f}s")

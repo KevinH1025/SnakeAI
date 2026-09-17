@@ -24,11 +24,9 @@ DANGER_SLOTS = (I_DANGER_STRAIGHT, I_DANGER_LEFT, I_DANGER_RIGHT)
 
 
 class QNetwork(nn.Module):
-    """A plain stack of Linear + ReLU layers.
+    """Observation in, one value per action out.
 
-    In goes an observation, out come three numbers: how good each action looks.
-    There are deliberately no BatchNorm or Dropout layers here, so train() and eval() compute
-    the same function and no stray mode switch can change what the network does.
+    No BatchNorm or Dropout, so train() and eval() compute the same thing.
     """
 
     def __init__(self, obs_dim: int = OBS_DIM, n_actions: int = N_ACTIONS,
@@ -61,12 +59,9 @@ def double_dqn_target(
     next_q_target: torch.Tensor,
     gamma: float,
 ) -> torch.Tensor:
-    """What the Q-value for the action we took should have been.
+    """target = reward + gamma * (value of the next state) * (0 if we died, else 1)
 
-        target = reward + gamma * (value of the next state) * (0 if we died, else 1)
-
-    The online network picks which action is best next; the target network says what it is worth.
-    Note this takes Q values, not states or networks, so it cannot evaluate the wrong state.
+    The online net picks which next action is best. The target net says what it is worth.
     """
     best = next_q_online.argmax(dim=1, keepdim=True) # online net chooses
     next_value = next_q_target.gather(1, best).squeeze(1) # target net prices that choice
@@ -288,12 +283,8 @@ class DQNAgent:
     # -- learning -----------------------------------------------------------
 
     def learn(self, batch_size: int | None = None) -> float | None:
-        """One gradient step: take a pile of past moves and nudge the weights.
-
-        The idea in one line: for each past move, compare what the network SAID that move was
-        worth against what it TURNED OUT to be worth and shrink the gap.
-
-        Returns the loss or None if there is not enough experience collected yet.
+        """One gradient step. Compare what the network said each past move was worth against
+        what it turned out to be worth, then shrink the gap. None if there is not enough data.
         """
         if batch_size is None:
             batch_size = self.cfg.batch_size

@@ -28,9 +28,7 @@ def evaluate(agent: DQNAgent, cfg: Config, episodes: int | None = None,
              seed: int | None = None, max_steps: int | None = None) -> dict:
     """Run ``episodes`` greedy episodes in parallel and summarise them.
 
-    Episodes still running when ``max_steps`` is reached are reported as ``unfinished`` and are
-    **excluded from the averages**. Scoring them as zero would make the metric fall exactly as the
-    agent got good enough to survive longer, which is worse than not measuring at all.
+    Episodes still running at ``max_steps`` count as unfinished and are left out of the averages.
     """
     episodes = episodes if episodes is not None else cfg.train.eval_episodes
     seed = seed if seed is not None else cfg.train.eval_seed
@@ -45,23 +43,30 @@ def evaluate(agent: DQNAgent, cfg: Config, episodes: int | None = None,
     reasons: list[str] = ["unfinished"] * episodes
 
     for _ in range(max_steps):
-        actions = agent.act(vec.current_obs, epsilon=0.0) # greedy: no exploration during eval
+        actions = agent.act(vec.current_obs, epsilon=0.0) # greedy, no exploration during eval
         _, _, _, _, finished = vec.step(actions)
+
         for info in finished:
             i = info["env"]
+
             if done[i]:
-                continue  # only the FIRST episode of each env counts
+                continue # only the FIRST episode of each game counts
+
             done[i] = True
             scores[i] = info["score"]
             returns[i] = info["return"]
             lengths[i] = info["length"]
             steps_taken[i] = info["episode_steps"]
             reasons[i] = info["reason"]
+
         if done.all():
-            break # every episode finished, no need to burn the rest of max_steps
+            break # all finished, no need to burn the rest of max_steps
 
     n = int(done.sum()) # how many actually finished
-    mean = (lambda a: float(a[done].mean()) if n else 0.0) # average over FINISHED episodes only
+
+    def mean(values): # average over the finished episodes only
+        return float(values[done].mean()) if n else 0.0
+
     return {
         "episodes": episodes,
         "finished": n,

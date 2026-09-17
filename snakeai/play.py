@@ -151,31 +151,42 @@ def watch(checkpoint: Path, fps: int, follow: bool, device_spec: str, seed: int 
 def play_human(cfg: Config, fps: int, seed: int | None) -> None:
     """Arrow keys / WASD. Absolute input is converted to the egocentric action the env expects."""
     renderer = Renderer(cfg)
+
     env = SnakeEnv(cfg.env, seed=seed)
     env.reset(seed=seed)
+
+    # which compass direction each key asks for
     key_dir = {
         pygame.K_UP: 0, pygame.K_w: 0, pygame.K_RIGHT: 1, pygame.K_d: 1,
         pygame.K_DOWN: 2, pygame.K_s: 2, pygame.K_LEFT: 3, pygame.K_a: 3,
     }
-    wanted = env.heading
-    best, episodes = 0, 0
+
+    wanted = env.heading # the direction the player last asked for
+    best = 0
+    episodes = 0
     running = True
+
     while running:
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+
             elif event.type == pygame.KEYDOWN:
                 if event.key in (pygame.K_ESCAPE, pygame.K_q):
                     running = False
                 elif event.key in key_dir:
                     wanted = key_dir[event.key]
+
         if not running:
             break
+
         if env.done:
             episodes += 1
             best = max(best, env.score)
             env.reset()
             wanted = env.heading
+
 
         # Pick the egocentric action whose resulting heading matches the key; a 180 is ignored.
         action = 0 # default to straight if the key asks for a 180

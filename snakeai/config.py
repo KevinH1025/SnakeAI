@@ -183,6 +183,7 @@ class Config:
 
 PRESETS: dict[str, dict[str, Any]] = {
     "default": {},
+
     # The ORIGINAL v1 board: 800x600 at GRID_SIZE 20 == 40x30 cells. Use this to compare against
     # the v1 agent's best score of 94 (see docs/ and model/Best_DQN_Model_64_512_94_776k/).
     "big": {
@@ -199,7 +200,8 @@ PRESETS: dict[str, dict[str, Any]] = {
         # we simply do not get.
         "train.eval_max_steps": 30_000,
     },
-    # A full learning curve in a few minutes. Used by the tests and for hand-iteration.
+
+    # A full learning curve in a few minutes. Used by the tests and for hand iteration.
     "small": {
         "env.grid_w": 8,
         "env.grid_h": 8,
@@ -294,9 +296,7 @@ def _coerce(raw: str, tp: Any, key: str) -> Any:
 def _set_path(obj: Any, path: str, raw: str, root: Any, full: str | None = None) -> Any:
     """Rebuild ``obj`` with one dotted leaf replaced.
 
-    ``full`` carries the *original* dotted key down the recursion so an error names the whole path
-    ("agent.gama") rather than the tail ("gama"). That also lets difflib match it against the
-    full key list and suggest "agent.gamma".
+    ``full`` carries the original key down the recursion so errors name the whole path.
     """
     full = full if full is not None else path
     head, _, rest = path.partition(".")

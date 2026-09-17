@@ -264,18 +264,10 @@ class SnakeEnv:
         return blocked
 
     def _tail_reachable(self, head: tuple[int, int], blocked: bytearray) -> tuple[float, float, float]:
-        """For each move: after making it, could I still walk back round to my own tail?
+        """After each move, could the snake still reach its own tail?
 
-        This is the classic Snake safety check. If a path to the tail still exists, the tail keeps
-        retreating ahead of you and the space opens up, so you can survive. If it does not, you are
-        sealed into a pocket and will die once you fill it, even if that pocket is currently large.
-
-        free_* cannot answer this. Two moves can both lead into plenty of room while only one of
-        them stays connected to the tail.
-
-        One flood, started AT THE TAIL, asking which of the three cells it can get to, rather than
-        three floods, one per cell. The three cells are usually in the same region, so flooding
-        from each of them separately would walk the same ground three times over.
+        If it can, the tail keeps retreating ahead of it and the space opens up. If it cannot, it
+        is sealed in and will die once the pocket fills, however roomy that pocket looks now.
         """
         width = self.cfg.grid_w
         height = self.cfg.grid_h
@@ -348,14 +340,9 @@ class SnakeEnv:
 
     def _free_spaces(self, head: tuple[int, int], budget: int,
                      blocked: bytearray) -> tuple[int, int, int]:
-        """How many empty cells each of the three moves leads into.
+        """How many empty cells each move leads into, as (straight, left, right).
 
-        Imagine taking each move, then spreading out from where you land through every empty cell
-        you can walk to, like water filling a room. Count the cells as you go. Stop once you have
-        counted `budget` of them, because the question is only "is there room for my whole body",
-        not "exactly how big is this".
-
-        Returns three counts, in the order (straight, left, right).
+        Spreads out from the cell each move lands on, counting as it goes, stopping at `budget`.
         """
         width = self.cfg.grid_w
         height = self.cfg.grid_h
@@ -440,12 +427,10 @@ class SnakeEnv:
             # reached the budget (plenty of room). Either way, `count` is the answer.
             counts[slot] = count
 
-            # STEP 4: the shortcut. If this flood happened to walk over one of the OTHER two
-            # entry cells, then that move leads into the same region, so flooding from it would
-            # count exactly the same cells and give exactly the same answer. Copy it instead of
-            # walking the same ground again. On an open board this makes one flood do all three.
-            # Note we only copy when the cell was positively visited. Never assume from absence,
-            # because a flood that stopped at the budget may simply not have got there yet.
+            # If this flood walked over another move's entry cell, that move is in the same
+            # region and would count the same cells, so copy the answer instead of re-walking.
+            # Only when positively visited: a flood that stopped at the budget may just not
+            # have reached it yet.
             for other in range(slot + 1, 3):
                 if counts[other] is None and visited[entries[other]] == token:
                     counts[other] = count
