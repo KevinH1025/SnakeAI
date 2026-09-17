@@ -66,11 +66,11 @@ class AgentConfig:
     gamma: float = 0.99 # discount factor
     # Every iteration the loop plays num_envs moves, then does updates_per_iter gradient steps
     # of batch_size samples each. Nothing here is scaled or derived, what you set is what runs.
-    updates_per_iter: int = 8 # gradient steps after each round of moves
-    batch_size: int = 2_048 # past moves each gradient step learns from
+    updates_per_iter: int = 2 # gradient steps after each round of moves
+    batch_size: int = 8_192 # past moves each gradient step learns from
     buffer_capacity: int = 1_000_000 # replay size, ~125 MB at this obs width on the GPU
     learning_starts: int = 20_000 # collect this many moves before training starts
-    target_sync_steps: int = 4_000 # copy online net into target net every N moves
+    target_sync_steps: int = 1_000 # copy online net into target net every N moves
     grad_clip: float = 10.0 # max gradient norm
     epsilon_start: float = 1.0 # fully random at the start
     epsilon_final: float = 0.01 # floor. 0.05 killed long snakes: 1 random move per 20 steps
@@ -85,8 +85,8 @@ class AgentConfig:
 class TrainConfig:
     total_steps: int = 500_000 # env transitions, not iterations
     log_every: int = 2_000 # write a metrics.csv row
-    eval_every: int = 25_000 # run a greedy evaluation
-    eval_episodes: int = 20 # episodes per evaluation
+    eval_every: int = 100_000 # run a greedy evaluation
+    eval_episodes: int = 64 # episodes per evaluation
     eval_seed: int = 12_345 # fixed, so checkpoints face identical food sequences
     eval_max_steps: int = 5_000 # give up on an episode after this many steps
     save_every: int = 25_000 # write ckpt.pt
@@ -265,7 +265,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         # Good episodes run for many thousands of steps. One that hits the cap is a
         # measurement we simply do not get.
         "train.eval_max_steps": 30_000,
-        "train.save_every": 10_000,
+        "train.save_every": 100_000,
     },
 
     # A full learning curve in a few minutes. Used by the tests and for hand iteration.
