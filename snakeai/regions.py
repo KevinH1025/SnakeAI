@@ -1,17 +1,22 @@
 """Working out which parts of the board the snake can still get to.
 
-Two questions get asked on every single step, for each of the three moves:
+Three questions get asked on every single step, for each of the three moves:
 
   how much room does this move lead into?   ->  free_straight / free_left / free_right
   could I still reach my own tail after it? ->  tail_straight / tail_left / tail_right
+  how open is it just around the corner?    ->  reach_straight / reach_left / reach_right
 
-Both are answered by splitting the empty cells into connected regions, giving each one an id and
-a size, then looking things up. Same region as the tail means the tail is reachable. Region size
-capped at the snake's length is the room available.
+The first two are answered together. The empty cells get split into connected regions, each
+with an id and a size. Same region as the tail means the tail is reachable. Region size,
+capped at the snake's length, is the room available.
 
-If numba is installed the labelling runs compiled, which measured about 20x faster than the plain
-Python version. If it is not, the plain version runs instead and gives identical answers. There
-is a test for that.
+The third needs its own walk. Once two moves open into the same region the first two answers
+give them the same number, so the third counts only what is a short walk away, which stays
+different between them.
+
+If numba is installed both run compiled, which measured about 20x faster than the plain
+Python versions. If it is not, the plain versions run instead and give identical answers.
+There is a test for that.
 """
 
 from __future__ import annotations
@@ -28,37 +33,41 @@ except ImportError: # numba is optional, everything still works without it
 def _label(blocked, entries, tail, budget, width, height, label, sizes, stack):
     """Split the empty cells into regions, then read off both answers.
 
-    `blocked` is a flat width*height array, 1 where the body is. `entries` holds the flat index
-    each move lands on, or -1 if that move is off the board or into the body. `label`, `sizes`
-    and `stack` are scratch arrays passed in so they can be reused instead of reallocated.
+    blocked: flat width*height array, 1 where the body is.
+    entries: the flat index each move lands on, or -1 if that move is off the board or into
+        the body.
+    tail: flat index of the tail cell, the one a move has to still reach.
+    budget: region sizes are capped at this, so anything roomier than the snake reads the same.
+    label, sizes, stack: scratch arrays passed in so they can be reused instead of reallocated.
 
     Returns (counts, tails), each three long, in the order straight, left, right.
     """
-    n = width * height
+    cells = width * height # one flat index per board square
 
-    for i in range(n):
+    for i in range(cells):
         label[i] = 0 # 0 means "not yet given a region"
 
     region = 0
-    for start in range(n):
+    for start in range(cells):
         if blocked[start] == 1 or label[start] != 0:
             continue # body, or already part of a region we found earlier
 
         # A cell nobody has reached yet, so it opens a new region. Spread out from it and claim
         # everything connected, counting as we go.
-        region += 1
-        label[start] = region
-        stack[0] = start
-        top = 1
-        size = 0
+        region += 1 # the id this new region gets
+        label[start] = region # claim the cell we started from
+
+        stack[0] = start # the only cell waiting to be spread out from
+        top = 1 # cells waiting on the stack
+        size = 0 # cells claimed for this region so far
 
         while top > 0:
-            top -= 1
-            here = stack[top]
-            size += 1
+            top -= 1 # take the cell off the top
+            here = stack[top] # the cell we are spreading out from
+            size += 1 # it belongs to this region
 
-            here_x = here % width
-            here_y = here // width
+            here_x = here % width # column
+            here_y = here // width # row
 
             if here_x > 0: # west
                 west = here - 1
@@ -88,21 +97,22 @@ def _label(blocked, entries, tail, budget, width, height, label, sizes, stack):
                     stack[top] = south
                     top += 1
 
-        sizes[region] = size
+        sizes[region] = size # the region is fully claimed, so record how big it was
 
     # Every empty cell now knows its region, so both features are just lookups.
-    counts = np.zeros(3, np.int32)
-    tails = np.zeros(3, np.float32)
-    tail_region = label[tail]
+    counts = np.zeros(3, np.int32) # room each move leads into
+    tails = np.zeros(3, np.float32) # 1.0 where the tail shares the region
+
+    tail_region = label[tail] # the region the tail is sitting in
 
     for slot in range(3):
         if entries[slot] < 0:
             continue # that move is fatal, so it leads nowhere
 
-        region_here = label[entries[slot]]
-        counts[slot] = sizes[region_here] if sizes[region_here] < budget else budget
+        region_here = label[entries[slot]] # the region this move opens into
+        counts[slot] = sizes[region_here] if sizes[region_here] < budget else budget # capped
         if region_here == tail_region:
-            tails[slot] = 1.0
+            tails[slot] = 1.0 # the tail is in there with us
 
     return counts, tails
 
@@ -111,12 +121,13 @@ def _reach(blocked, entries, depth, width, height, seen, queue):
     """How many cells sit within `depth` moves of where each move lands.
 
     A different question from the one _label answers. Region size says whether a move leads
-    anywhere survivable, which is one number shared by every move whenever they open into the
-    same region, and on a mostly empty board they nearly always do. Counting only what is close
-    by stays different between moves, because it measures how hemmed in each one is right now.
+    anywhere survivable. Moves that open into the same region all get that same number, which
+    on a mostly empty board is nearly all of them. Counting only what is close by stays
+    different between moves, because it measures how hemmed in each one is right now.
 
-    `seen` and `queue` are scratch arrays, reused between calls. `seen` is left all zero on the
-    way out, so it never has to be cleared up front.
+    depth: how many steps out from the entry cell the count reaches.
+    seen, queue: scratch arrays, reused between calls. `seen` is left all zero on the way out,
+        so it never has to be cleared up front.
 
     Returns three counts, in the order straight, left, right.
     """
@@ -126,22 +137,24 @@ def _reach(blocked, entries, depth, width, height, seen, queue):
         if entries[slot] < 0:
             continue # that move is fatal, so it opens nothing up
 
-        queue[0] = entries[slot]
-        seen[entries[slot]] = 1
+        queue[0] = entries[slot] # the search starts from the cell this move lands on
+        seen[entries[slot]] = 1 # and never goes back to it
+
         read = 0 # next cell to pop
         write = 1 # next free slot, which doubles as the count so far
-        edge = 1 # cells left to pop at the depth we are on
-        next_edge = 0 # cells found one step further out
-        d = 0
+
+        ring_left = 1 # cells left to pop at the depth we are on
+        next_ring = 0 # cells found one step further out
+        distance = 0 # rings stepped out from the entry cell so far
 
         while read < write:
-            here = queue[read]
-            read += 1
-            edge -= 1
+            here = queue[read] # the cell we are spreading out from
+            read += 1 # it has been popped
+            ring_left -= 1 # one fewer waiting at this depth
 
-            if d < depth: # at the limit the queue still drains, it just stops growing
-                here_x = here % width
-                here_y = here // width
+            if distance < depth: # at the limit the queue still drains, it just stops growing
+                here_x = here % width # column
+                here_y = here // width # row
 
                 if here_x > 0: # west
                     west = here - 1
@@ -149,7 +162,7 @@ def _reach(blocked, entries, depth, width, height, seen, queue):
                         seen[west] = 1
                         queue[write] = west
                         write += 1
-                        next_edge += 1
+                        next_ring += 1
 
                 if here_x < width - 1: # east
                     east = here + 1
@@ -157,7 +170,7 @@ def _reach(blocked, entries, depth, width, height, seen, queue):
                         seen[east] = 1
                         queue[write] = east
                         write += 1
-                        next_edge += 1
+                        next_ring += 1
 
                 if here_y > 0: # north, y grows downward so this is minus a row
                     north = here - width
@@ -165,7 +178,7 @@ def _reach(blocked, entries, depth, width, height, seen, queue):
                         seen[north] = 1
                         queue[write] = north
                         write += 1
-                        next_edge += 1
+                        next_ring += 1
 
                 if here_y < height - 1: # south
                     south = here + width
@@ -173,14 +186,14 @@ def _reach(blocked, entries, depth, width, height, seen, queue):
                         seen[south] = 1
                         queue[write] = south
                         write += 1
-                        next_edge += 1
+                        next_ring += 1
 
-            if edge == 0: # that was the last cell at this depth, so step outward
-                d += 1
-                edge = next_edge
-                next_edge = 0
+            if ring_left == 0: # that was the last cell at this depth, so step outward
+                distance += 1 # one further out from the entry cell
+                ring_left = next_ring # what was found out there is the next ring
+                next_ring = 0 # ready to collect the ring after that
 
-        counts[slot] = write
+        counts[slot] = write # every cell the queue ever held is what is within reach
 
         for i in range(write):
             seen[queue[i]] = 0 # hand the next move a clean array
@@ -188,13 +201,15 @@ def _reach(blocked, entries, depth, width, height, seen, queue):
     return counts
 
 
+# ------------------------------------------------------------------- picking an implementation
+
 # The plain Python versions stay as the reference the tests check against.
-label_regions_python = _label
-reach_counts_python = _reach
+label_regions_python = _label # never compiled, whatever numba is doing
+reach_counts_python = _reach # same, the slow but obvious answer
 
 if HAVE_NUMBA:
-    label_regions = njit(cache=True)(_label)
-    reach_counts = njit(cache=True)(_reach)
+    label_regions = njit(cache=True)(_label) # compiled on first call, cached on disk after
+    reach_counts = njit(cache=True)(_reach) # same deal, the cache survives restarts
 else:
-    label_regions = _label
-    reach_counts = _reach
+    label_regions = _label # no numba, so the plain version is the only one there is
+    reach_counts = _reach # likewise

@@ -34,6 +34,24 @@ def turn(heading: int, action: int) -> int:
     return (heading + _TURN[action]) % 4 # wrap around the 4 directions
 
 
+def _neighbours(index: int, width: int, height: int) -> tuple[int, ...]:
+    """The flat indices next to `index`, in the order west, east, north, south."""
+    here_x = index % width # the column
+    here_y = index // width # the row, y grows downward
+    out = []
+
+    if here_x > 0:
+        out.append(index - 1) # west
+    if here_x < width - 1:
+        out.append(index + 1) # east
+    if here_y > 0:
+        out.append(index - width) # north is minus a whole row
+    if here_y < height - 1:
+        out.append(index + width) # south is plus a whole row
+
+    return tuple(out)
+
+
 class Event(enum.Enum):
     """What happened on a step."""
 
@@ -52,7 +70,7 @@ TERMINAL_EVENTS = frozenset({Event.HIT_WALL, Event.HIT_SELF, Event.WON})
 TRUNCATING_EVENTS = frozenset({Event.STARVED})
 
 
-# --------------------------------------------------------------------------- what the snake sees
+# ------------------------------------------------------------------------- what the snake sees
 
 I_DANGER_STRAIGHT = 0
 I_DANGER_LEFT = 1
@@ -232,19 +250,19 @@ class SnakeEnv:
             return None # no empty cells left, the snake has won
 
         # Guessing is fast while the board is mostly empty.
-        for _ in range(100):
+        for _ in range(100): # a hundred tries
             cell = (int(self.rng.integers(width)), int(self.rng.integers(height)))
             if cell not in self.occupied:
-                return cell
+                return cell # landed on an empty cell
 
         # Nearly full, so just list what is left.
         free = []
         for x in range(width):
             for y in range(height):
                 if (x, y) not in self.occupied:
-                    free.append((x, y))
+                    free.append((x, y)) # an empty cell the snake is not on
 
-        return free[int(self.rng.integers(len(free)))]
+        return free[int(self.rng.integers(len(free)))] # one of them, uniformly
 
     def _fatal(self, cell: tuple[int, int]) -> tuple[bool, bool]:
         """Would moving into this cell end the game? Returns (hit_wall, hit_self)."""
@@ -254,7 +272,8 @@ class SnakeEnv:
         if cell not in self.occupied:
             return False, False # empty cell, safe
 
-        # The tail moves out of the way as the head arrives, unless we are about to eat and grow.
+        # The tail moves out of the way as the head arrives, unless we are
+        # about to eat and grow.
         growing = self.food is not None and cell == self.food
         if cell == self.snake[-1] and not growing:
             return False, False
@@ -269,6 +288,31 @@ class SnakeEnv:
         hit_wall, hit_self = self._fatal(nxt)
 
         return hit_wall or hit_self
+
+    def _move_entries(self, head: tuple[int, int],
+                      blocked: bytearray | np.ndarray) -> list[int | None]:
+        """Which cell each of straight, left and right would put the head on.
+
+        Entries are flat indices (x + y*width). None means the move goes off the board or
+        into the body, so there is nothing behind it to measure.
+        """
+        width = self.cfg.grid_w
+        height = self.cfg.grid_h
+        entries: list[int | None] = []
+
+        for action in (ACTION_STRAIGHT, ACTION_LEFT, ACTION_RIGHT):
+            step = DIRECTIONS[turn(self.heading, action)] # where that action points
+            cell_x = head[0] + step[0]
+            cell_y = head[1] + step[1]
+
+            if not (0 <= cell_x < width and 0 <= cell_y < height):
+                entries.append(None) # off the board
+            elif blocked[cell_x + cell_y * width]:
+                entries.append(None) # into our own body
+            else:
+                entries.append(cell_x + cell_y * width)
+
+        return entries
 
     # The three methods below are the original flood implementation. observe() no longer calls
     # them, _regions() does the same job in one labelling pass. They are kept because the tests
@@ -293,44 +337,39 @@ class SnakeEnv:
 
         return blocked
 
-    def _tail_reachable(self, head: tuple[int, int], blocked: bytearray) -> tuple[float, float, float]:
+    def _tail_reachable(self, head: tuple[int, int],
+                        blocked: bytearray) -> tuple[float, float, float]:
         """After each move, could the snake still reach its own tail?
 
-        If it can, the tail keeps retreating ahead of it and the space opens up. If it cannot, it
-        is sealed in and will die once the pocket fills, however roomy that pocket looks now.
+        If it can, the tail keeps retreating ahead of it and the space opens up.
+        If it cannot, it is sealed in and will die once the pocket fills, however
+        roomy that pocket looks now.
         """
         width = self.cfg.grid_w
         height = self.cfg.grid_h
 
-        # Which cell would each move put the head on? Skip any that is a wall or a body cell.
+        # Which cell would each move put the head on, keyed by that cell.
         wanted: dict[int, list[int]] = {}
-        for slot, action in enumerate((ACTION_STRAIGHT, ACTION_LEFT, ACTION_RIGHT)):
-            step = DIRECTIONS[turn(self.heading, action)]
-            cell_x = head[0] + step[0]
-            cell_y = head[1] + step[1]
+        for slot, entry in enumerate(self._move_entries(head, blocked)):
+            if entry is not None: # a move that cannot be made stays 0.0
+                wanted.setdefault(entry, []).append(slot)
 
-            if not (0 <= cell_x < width and 0 <= cell_y < height):
-                continue # off the board, stays 0.0
-            if blocked[cell_x + cell_y * width]:
-                continue # into the body, stays 0.0
-
-            wanted.setdefault(cell_x + cell_y * width, []).append(slot)
-
-        reachable = [0.0, 0.0, 0.0]
         if not wanted:
             return 0.0, 0.0, 0.0 # every move is fatal anyway
+
+        reachable = [0.0, 0.0, 0.0]
 
         # Spread out from the tail. Every cell we touch is one the tail is connected to.
         tail_x, tail_y = self.snake[-1]
         start = tail_x + tail_y * width
 
         visited = bytearray(width * height)
-        visited[start] = 1
+        visited[start] = 1 # mark the tail before anything else
         stack = [start]
         still_looking = len(wanted)
 
         while stack and still_looking:
-            here = stack.pop()
+            here = stack.pop() # take any cell we have not looked around from yet
 
             if here in wanted: # this cell is one of our three, mark it and tick it off
                 for slot in wanted.pop(here):
@@ -339,122 +378,70 @@ class SnakeEnv:
                 if not still_looking:
                     break # found all three, no reason to keep walking
 
-            here_x = here % width
-            here_y = here // width
-
-            if here_x > 0:
-                west = here - 1
-                if not blocked[west] and not visited[west]:
-                    visited[west] = 1
-                    stack.append(west)
-
-            if here_x < width - 1:
-                east = here + 1
-                if not blocked[east] and not visited[east]:
-                    visited[east] = 1
-                    stack.append(east)
-
-            if here_y > 0:
-                north = here - width
-                if not blocked[north] and not visited[north]:
-                    visited[north] = 1
-                    stack.append(north)
-
-            if here_y < height - 1:
-                south = here + width
-                if not blocked[south] and not visited[south]:
-                    visited[south] = 1
-                    stack.append(south)
+            for neighbour in _neighbours(here, width, height):
+                if blocked[neighbour] or visited[neighbour]:
+                    continue # body cell, or somewhere this flood has already been
+                visited[neighbour] = 1 # stamp it so it is never walked twice
+                stack.append(neighbour)
 
         return reachable[0], reachable[1], reachable[2]
+
+    def _flood_from(self, entry: int, budget: int, blocked: bytearray,
+                    visited: bytearray, token: int) -> int:
+        """Count empty cells connected to `entry`, stopping once `budget` of them are counted.
+
+        Every cell this flood reaches is stamped with `token` in `visited`, so a later flood
+        that lands on one of them knows the two moves share a region.
+        """
+        width = self.cfg.grid_w
+        height = self.cfg.grid_h
+
+        # `stack` is the cells we have found but not yet looked around from.
+        visited[entry] = token # mark the entry cell before anything else
+        stack = [entry]
+        count = 0
+
+        while stack and count < budget:
+            here = stack.pop() # take any cell we have not looked around from yet
+            count += 1 # we are standing on it, so it counts as reachable
+
+            for neighbour in _neighbours(here, width, height):
+                if blocked[neighbour] or visited[neighbour] == token:
+                    continue # body cell, or somewhere this flood has already counted
+                visited[neighbour] = token # stamp it so it is never counted twice
+                stack.append(neighbour)
+
+        # The loop ended either because we ran out of cells (a small pocket) or because we
+        # reached the budget (plenty of room). Either way, `count` is the answer.
+        return count
 
     def _free_spaces(self, head: tuple[int, int], budget: int,
                      blocked: bytearray) -> tuple[int, int, int]:
         """How many empty cells each move leads into, as (straight, left, right).
 
-        Spreads out from the cell each move lands on, counting as it goes, stopping at `budget`.
+        Spreads out from the cell each move lands on, counting as it goes and
+        stopping at `budget`.
         """
-        width = self.cfg.grid_w
-        height = self.cfg.grid_h
-
-        # Marks which cells this flood has already been to, so it never counts one twice.
-        # We reuse ONE array across all three floods, stamping it with a different `token` each
-        # time (1, then 2, then 3) instead of clearing it. Clearing is slower than stamping.
-        visited = bytearray(width * height)
-
-        # STEP 1: work out which cell each of the three moves would put the head on.
-        # Store them as flat indices (x + y*width). None means "that move is not even possible".
-        entries = []
-        for action in (ACTION_STRAIGHT, ACTION_LEFT, ACTION_RIGHT):
-            step = DIRECTIONS[turn(self.heading, action)]
-            cell_x = head[0] + step[0]
-            cell_y = head[1] + step[1]
-
-            if not (0 <= cell_x < width and 0 <= cell_y < height):
-                entries.append(None) # that move goes off the board
-            elif blocked[cell_x + cell_y * width]:
-                entries.append(None) # that move goes into our own body
-            else:
-                entries.append(cell_x + cell_y * width)
-
-        # STEP 2: moves that are not possible have no room behind them, so their answer is 0.
-        # Everything still set to None is a move we actually have to go and measure.
+        # Which cell each move lands on. A move that cannot be made at all answers 0.
+        entries = self._move_entries(head, blocked)
         counts: list[int | None] = [None, None, None]
+
         for slot, entry in enumerate(entries):
             if entry is None:
-                counts[slot] = 0
+                counts[slot] = 0 # an impossible move has no room behind it
 
-        # STEP 3: measure each remaining move by flooding out from the cell it lands on.
+        # Marks which cells a flood has already been to, so it never counts one twice. One
+        # array serves all three floods, stamped with a different `token` (1, then 2, then 3)
+        # each time instead of being cleared, because stamping is cheaper than clearing.
+        visited = bytearray(self.cfg.grid_w * self.cfg.grid_h)
         token = 0
+
         for slot, entry in enumerate(entries):
             if counts[slot] is not None:
-                continue # already answered: either impossible or shared with an earlier flood
+                continue # already answered: impossible, or shared with an earlier flood
 
-            token += 1 # a fresh stamp, so this flood cannot be confused with the previous one
-
-            # `stack` is the list of cells we have found but not yet looked around from.
-            # Start with just the entry cell and mark it as visited immediately.
-            visited[entry] = token
-            stack = [entry]
-            count = 0
-
-            while stack and count < budget:
-                here = stack.pop() # take any cell we have not looked around from yet
-                count += 1 # we are standing on it, so it counts as reachable
-
-                # Turn the flat index back into x, y so we can find the neighbours.
-                here_x = here % width
-                here_y = here // width
-
-                # Look at all four neighbours. For each one: if it is on the board, is not body,
-                # and we have not already seen it this flood, then it is reachable too. Mark it
-                # and add it to the pile to look around from later.
-                if here_x > 0: # there is a cell to the west
-                    west = here - 1
-                    if not blocked[west] and visited[west] != token:
-                        visited[west] = token
-                        stack.append(west)
-
-                if here_x < width - 1: # to the east
-                    east = here + 1
-                    if not blocked[east] and visited[east] != token:
-                        visited[east] = token
-                        stack.append(east)
-
-                if here_y > 0: # to the north (y grows downward, so north is -width)
-                    north = here - width
-                    if not blocked[north] and visited[north] != token:
-                        visited[north] = token
-                        stack.append(north)
-
-                if here_y < height - 1: # to the south
-                    south = here + width
-                    if not blocked[south] and visited[south] != token:
-                        visited[south] = token
-                        stack.append(south)
-
-            # The loop ended either because we ran out of cells (a small pocket) or because we
-            # reached the budget (plenty of room). Either way, `count` is the answer.
+            token += 1 # a fresh stamp, so this flood cannot be confused with the last one
+            count = self._flood_from(entry, budget, blocked, visited, token)
             counts[slot] = count
 
             # If this flood walked over another move's entry cell, that move is in the same
@@ -472,7 +459,7 @@ class SnakeEnv:
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
         """Move once. Returns (obs, reward, terminated, truncated, info)."""
         if self._needs_reset:
-            raise RuntimeError("step() on a finished episode - call reset()")
+            raise RuntimeError("step() on a finished episode: call reset()")
 
         cfg = self.cfg
         head = self.snake[0]
@@ -486,38 +473,11 @@ class SnakeEnv:
         hit_wall, hit_self = self._fatal(nxt)
 
         if hit_wall or hit_self:
-            # The bad move is not applied: the snake stays exactly where it died.
-            self.crash_cell = nxt
-            self.last_event = Event.HIT_WALL if hit_wall else Event.HIT_SELF
-            self.terminated = True
-
+            self._crash(nxt, hit_wall) # the bad move is not applied
         elif growing:
-            self.snake.insert(0, nxt) # new head and no tail removed, so the snake grows
-            self.occupied.add(nxt)
-
-            self.score += 1
-            self.steps_since_food = 0 # fed, so reset the hunger clock
-            self.food = self._spawn_food()
-
-            if self.food is None:
-                self.last_event = Event.WON # filled the whole board
-                self.terminated = True
-            else:
-                self.last_event = Event.ATE
-
+            self._eat(nxt)
         else:
-            tail = self.snake.pop() # drop the tail
-            self.snake.insert(0, nxt) # and add the new head
-            self.occupied.discard(tail)
-            self.occupied.add(nxt)
-
-            self.steps_since_food += 1
-
-            if self.steps_since_food >= cfg.max_steps_without_food:
-                self.last_event = Event.STARVED
-                self.truncated = True # out of patience, but not dead
-            else:
-                self.last_event = Event.MOVE
+            self._advance(nxt)
 
         self.steps += 1
 
@@ -533,6 +493,42 @@ class SnakeEnv:
 
         return self.observe(), reward, self.terminated, self.truncated, self._info()
 
+    def _crash(self, cell: tuple[int, int], hit_wall: bool) -> None:
+        """Record a fatal move. The snake is left exactly where it died."""
+        self.crash_cell = cell # the cell we died trying to enter
+        self.last_event = Event.HIT_WALL if hit_wall else Event.HIT_SELF
+        self.terminated = True
+
+    def _eat(self, cell: tuple[int, int]) -> None:
+        """Grow into the food cell, then put new food out."""
+        self.snake.insert(0, cell) # new head and no tail removed, so the snake grows
+        self.occupied.add(cell)
+
+        self.score += 1
+        self.steps_since_food = 0 # fed, so reset the hunger clock
+        self.food = self._spawn_food()
+
+        if self.food is None:
+            self.last_event = Event.WON # filled the whole board
+            self.terminated = True
+        else:
+            self.last_event = Event.ATE
+
+    def _advance(self, cell: tuple[int, int]) -> None:
+        """Move one cell without growing, then check the hunger clock."""
+        tail = self.snake.pop() # drop the tail
+        self.snake.insert(0, cell) # and add the new head
+        self.occupied.discard(tail)
+        self.occupied.add(cell)
+
+        self.steps_since_food += 1
+
+        if self.steps_since_food >= self.cfg.max_steps_without_food:
+            self.last_event = Event.STARVED
+            self.truncated = True # out of patience, but not dead
+        else:
+            self.last_event = Event.MOVE
+
     def _info(self) -> dict:
         return {
             "event": self.last_event,
@@ -543,10 +539,11 @@ class SnakeEnv:
             "crash_cell": self.crash_cell,
         }
 
-    def _regions(self, head: tuple[int, int]):
+    def _regions(self, head: tuple[int, int]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Room available and tail reachability for all three moves, in one pass.
 
         Returns (counts, tails, reach), each three long, in the order straight, left, right.
+        counts and reach are int32, tails is float32.
         """
         width = self.cfg.grid_w
         height = self.cfg.grid_h
@@ -558,24 +555,18 @@ class SnakeEnv:
             self._blocked[body_x + body_y * width] = 1
 
         tail_x, tail_y = self.snake[-1]
-        tail = tail_x + tail_y * width
-        self._blocked[tail] = 0
+        tail = tail_x + tail_y * width # the tail as a flat index
+        self._blocked[tail] = 0 # it steps out of the way as the head arrives
 
         # Where each move would put the head, or -1 if that move cannot be made at all.
-        for slot, action in enumerate((ACTION_STRAIGHT, ACTION_LEFT, ACTION_RIGHT)):
-            step = DIRECTIONS[turn(self.heading, action)]
-            cell_x = head[0] + step[0]
-            cell_y = head[1] + step[1]
+        for slot, entry in enumerate(self._move_entries(head, self._blocked)):
+            self._entries[slot] = -1 if entry is None else entry # -1 means the move is fatal
 
-            if not (0 <= cell_x < width and 0 <= cell_y < height):
-                self._entries[slot] = -1 # off the board
-            elif self._blocked[cell_x + cell_y * width]:
-                self._entries[slot] = -1 # into the body
-            else:
-                self._entries[slot] = cell_x + cell_y * width
+        budget = len(self.snake) + 1 # room worth having is room for my whole body
 
-        counts, tails = label_regions(self._blocked, self._entries, tail, len(self.snake) + 1,
+        counts, tails = label_regions(self._blocked, self._entries, tail, budget,
                                       width, height, self._label, self._sizes, self._stack)
+
         reach = reach_counts(self._blocked, self._entries, REACH_DEPTH,
                              width, height, self._seen, self._queue)
 
@@ -593,17 +584,34 @@ class SnakeEnv:
         return distance / (self.cfg.grid_w + self.cfg.grid_h)
 
     def observe(self) -> np.ndarray:
-        """Build the 14 numbers the network sees. Everything is relative to the heading."""
+        """Build the 20 numbers the network sees. Everything is relative to the heading."""
         cfg = self.cfg
         obs = np.zeros(OBS_DIM, dtype=np.float32) # a fresh array every call, never reused
         head = self.snake[0]
 
-        # Is each of the three moves immediately fatal?
-        obs[I_DANGER_STRAIGHT] = float(self._would_die(head, turn(self.heading, ACTION_STRAIGHT)))
-        obs[I_DANGER_LEFT] = float(self._would_die(head, turn(self.heading, ACTION_LEFT)))
-        obs[I_DANGER_RIGHT] = float(self._would_die(head, turn(self.heading, ACTION_RIGHT)))
+        self._observe_danger(obs, head) # slots 0-2, is each move immediately fatal
+        self._observe_food(obs, head) # slots 3-8, where the food is from here
 
-        # Where is the food, from the snake's point of view?
+        # How big am I and how hungry?
+        obs[I_LENGTH_FRAC] = len(self.snake) / (cfg.grid_w * cfg.grid_h)
+        obs[I_HUNGER_FRAC] = min(self.steps_since_food / cfg.max_steps_without_food, 1.0)
+
+        self._observe_space(obs, head) # slots 11-19, room, tail and reach
+
+        return obs
+
+    def _observe_danger(self, obs: np.ndarray, head: tuple[int, int]) -> None:
+        """Is each of the three moves immediately fatal?"""
+        straight = turn(self.heading, ACTION_STRAIGHT) # the heading each move leaves us on
+        left = turn(self.heading, ACTION_LEFT)
+        right = turn(self.heading, ACTION_RIGHT)
+
+        obs[I_DANGER_STRAIGHT] = float(self._would_die(head, straight)) # 1.0 if it kills me
+        obs[I_DANGER_LEFT] = float(self._would_die(head, left))
+        obs[I_DANGER_RIGHT] = float(self._would_die(head, right))
+
+    def _observe_food(self, obs: np.ndarray, head: tuple[int, int]) -> None:
+        """Where is the food, from the snake's point of view?"""
         if self.food is not None:
             ahead = DIRECTIONS[self.heading] # unit vector pointing where we face
             rightward = DIRECTIONS[(self.heading + 1) % 4] # and 90 degrees clockwise of that
@@ -613,7 +621,7 @@ class SnakeEnv:
 
             forward = dx * ahead[0] + dy * ahead[1] # how far ahead the food is
             lateral = dx * rightward[0] + dy * rightward[1] # how far to the right it is
-            scale = max(cfg.grid_w, cfg.grid_h)
+            scale = max(self.cfg.grid_w, self.cfg.grid_h)
 
             obs[I_FOOD_AHEAD] = float(forward > 0)
             obs[I_FOOD_BEHIND] = float(forward < 0)
@@ -622,13 +630,11 @@ class SnakeEnv:
             obs[I_FOOD_FORWARD] = float(np.clip(forward / scale, -1.0, 1.0))
             obs[I_FOOD_LATERAL] = float(np.clip(lateral / scale, -1.0, 1.0))
 
-        # How big am I and how hungry?
-        obs[I_LENGTH_FRAC] = len(self.snake) / (cfg.grid_w * cfg.grid_h)
-        obs[I_HUNGER_FRAC] = min(self.steps_since_food / cfg.max_steps_without_food, 1.0)
-
-        # Room available down each move, and whether the tail is still reachable after it. One
-        # pass splits the empty cells into regions, then both answers are lookups. 1.0 room means
-        # "enough for my whole body".
+    def _observe_space(self, obs: np.ndarray, head: tuple[int, int]) -> None:
+        """How much room each move leads into and how close up that room is."""
+        # Room available down each move and whether the tail is still reachable after it.
+        # One pass splits the empty cells into regions, then both answers are lookups.
+        # 1.0 room means "enough for my whole body".
         counts, tails, reach = self._regions(head)
         budget = len(self.snake) + 1
 
@@ -645,5 +651,3 @@ class SnakeEnv:
         obs[I_REACH_STRAIGHT] = reach[0] / REACH_MAX
         obs[I_REACH_LEFT] = reach[1] / REACH_MAX
         obs[I_REACH_RIGHT] = reach[2] / REACH_MAX
-
-        return obs

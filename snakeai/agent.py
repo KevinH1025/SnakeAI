@@ -1,6 +1,6 @@
 """The learner: the Q-network, the replay buffer and the learning step.
 
-The replay buffer lives on the same device as the network, so sampling never copies to the host.
+The replay buffer lives on the network's device, so sampling never copies to the host.
 Actions are always chosen for a whole batch of games at once. See docs/BENCHMARKS.md for why.
 """
 
@@ -49,7 +49,7 @@ class QNetwork(nn.Module):
         return self.net(x)
 
 
-# --------------------------------------------------------------------------- the learning target
+# ------------------------------------------------------------------------ the learning target
 
 
 def double_dqn_target(
@@ -67,6 +67,9 @@ def double_dqn_target(
     next_value = next_q_target.gather(1, best).squeeze(1) # target net prices that choice
 
     return rewards + gamma * next_value * (1.0 - terminated)
+
+
+# ------------------------------------------------------------------- the exploration schedule
 
 
 def epsilon_at(step: int, cfg: AgentConfig) -> float:
@@ -103,11 +106,14 @@ class ReplayBuffer:
         self.device = device
 
         # Allocated once, up front and reused forever.
-        self.obs = torch.zeros((self.capacity, obs_dim), dtype=torch.float32, device=device)
-        self.next_obs = torch.zeros((self.capacity, obs_dim), dtype=torch.float32, device=device)
-        self.actions = torch.zeros(self.capacity, dtype=torch.int64, device=device)
-        self.rewards = torch.zeros(self.capacity, dtype=torch.float32, device=device)
-        self.terminated = torch.zeros(self.capacity, dtype=torch.float32, device=device)
+        rows = self.capacity # one array entry per stored transition
+        obs_shape = (rows, obs_dim) # the observation arrays are 2D, the rest are flat
+
+        self.obs = torch.zeros(obs_shape, dtype=torch.float32, device=device) # before
+        self.next_obs = torch.zeros(obs_shape, dtype=torch.float32, device=device) # after
+        self.actions = torch.zeros(rows, dtype=torch.int64, device=device) # what we did
+        self.rewards = torch.zeros(rows, dtype=torch.float32, device=device) # what we got
+        self.terminated = torch.zeros(rows, dtype=torch.float32, device=device) # died there?
 
         self.pos = 0 # where the next row goes
         self.size = 0 # how many rows are filled in
@@ -120,6 +126,7 @@ class ReplayBuffer:
 
     @property
     def nbytes(self) -> int:
+        """How much device memory the arrays take, filled or not."""
         total = 0
         for tensor in (self.obs, self.next_obs, self.actions, self.rewards, self.terminated):
             total += tensor.numel() * tensor.element_size()
@@ -132,9 +139,11 @@ class ReplayBuffer:
         n = obs.shape[0]
 
         if n > self.capacity:
-            raise ValueError(f"cannot insert {n} transitions into a buffer of capacity {self.capacity}")
+            raise ValueError(
+                f"cannot insert {n} transitions into a buffer of capacity {self.capacity}"
+            )
 
-        idx = (self.pos + torch.arange(n, device=self.device)) % self.capacity
+        idx = (self.pos + torch.arange(n, device=self.device)) % self.capacity # wraps round
 
         self.obs[idx] = obs
         self.next_obs[idx] = next_obs # stays on the same row as its obs
@@ -187,7 +196,8 @@ class ReplayBuffer:
 
         if n > self.capacity:
             raise ValueError(
-                f"saved buffer holds {n} transitions but agent.buffer_capacity is {self.capacity}; "
+                f"saved buffer holds {n} transitions but "
+                f"agent.buffer_capacity is {self.capacity}; "
                 "raise buffer_capacity or resume with train.save_buffer=false"
             )
 
@@ -197,7 +207,7 @@ class ReplayBuffer:
         self.size = n
 
         if n == self.capacity:
-            self.pos = int(state["pos"]) % self.capacity # full, so the old cursor still means something
+            self.pos = int(state["pos"]) % self.capacity # full: the saved cursor still holds
         else:
             self.pos = n % self.capacity # carry on after the restored rows
 
@@ -218,19 +228,19 @@ class DQNAgent:
         # pointed at parameters that already live where they will stay.
         self.online = QNetwork(obs_dim, n_actions, tuple(cfg.hidden)).to(device)
 
-        self.target = copy.deepcopy(self.online).to(device) # a frozen copy, updated occasionally
+        # The training loop decides when to call sync_target(), counted in moves played, so
+        # target staleness cannot drift when num_envs changes.
+        self.target = copy.deepcopy(self.online).to(device) # frozen copy, synced now and then
         self.target.requires_grad_(False)
         self.target.eval()
 
-        self.optimizer = torch.optim.Adam(self.online.parameters(), lr=cfg.lr)
+        trained = self.online.parameters() # the only weights that ever change
+        self.optimizer = torch.optim.Adam(trained, lr=cfg.lr) # one step per learn()
 
-        self.buffer = ReplayBuffer(cfg.buffer_capacity, device, obs_dim, seed)
+        self.buffer = ReplayBuffer(cfg.buffer_capacity, device, obs_dim, seed) # past moves
         self.rng = np.random.default_rng(seed) # used for random exploration moves
 
         self.updates = 0 # how many gradient steps we have taken
-
-        # The training loop decides when to call sync_target(), counted in moves played, so
-        # target staleness cannot drift when num_envs changes.
         self.samples = 0 # gradient samples seen, for reporting only
 
     # -- choosing moves -----------------------------------------------------
@@ -239,7 +249,7 @@ class DQNAgent:
     def act(self, obs: np.ndarray, epsilon: float) -> np.ndarray:
         """Pick an action for each game. Takes (n_envs, obs_dim), returns (n_envs,).
 
-        Mostly picks whatever the network rates highest, but with probability `epsilon` it moves
+        Mostly picks whatever the network rates highest. With probability `epsilon` it moves
         at random instead, so the agent keeps discovering things.
         """
         obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
@@ -247,12 +257,14 @@ class DQNAgent:
         if obs_t.ndim == 1:
             obs_t = obs_t.unsqueeze(0) # accept a single observation too
 
-        n = obs_t.shape[0]
-        actions = self.online(obs_t).argmax(dim=1).cpu().numpy() # best action per game
+        n = obs_t.shape[0] # how many games we are choosing for
+
+        q_values = self.online(obs_t) # (n, 3), one value per action
+        actions = q_values.argmax(dim=1).cpu().numpy() # best action per game
 
         explore = self.rng.random(n) < epsilon # which games move randomly this step
         if explore.any():
-            random_actions = self._random_actions(obs_t.shape[0], obs)
+            random_actions = self._random_actions(n, obs)
             actions = np.where(explore, random_actions, actions)
 
         return actions.astype(np.int64)
@@ -280,6 +292,37 @@ class DQNAgent:
 
     # -- learning -----------------------------------------------------------
 
+    def _predicted_values(self, batch: Batch) -> torch.Tensor:
+        """What the network says the moves that were actually taken are worth."""
+        all_q = self.online(batch.obs) # (batch, 3), one value per action
+        taken = batch.actions.unsqueeze(1) # (batch, 1), the column to pull out
+
+        return all_q.gather(1, taken).squeeze(1) # (batch,)
+
+    @torch.no_grad()
+    def _target_values(self, batch: Batch) -> torch.Tensor:
+        """What those moves turned out to be worth: the reward plus the next state's value.
+
+        no_grad because this is the thing we are aiming at: training the target to meet the
+        prediction halfway would leave nothing to learn from.
+        """
+        next_q_online = self.online(batch.next_obs) # picks WHICH next action looks best
+        next_q_target = self.target(batch.next_obs) # says what that action is WORTH
+
+        return double_dqn_target(
+            batch.rewards, batch.terminated, next_q_online, next_q_target, self.cfg.gamma
+        )
+
+    def _apply_gradients(self, loss: torch.Tensor) -> None:
+        """Backpropagate the loss and take one optimizer step."""
+        self.optimizer.zero_grad(set_to_none=True) # clear last step's gradients
+        loss.backward() # work out which weights caused the gap
+
+        params = self.online.parameters() # only the online net is trained
+        nn.utils.clip_grad_norm_(params, self.cfg.grad_clip) # keep the step bounded
+
+        self.optimizer.step() # THIS is the line where the weights actually change
+
     def learn(self, batch_size: int | None = None) -> float | None:
         """One gradient step. Compare what the network said each past move was worth against
         what it turned out to be worth, then shrink the gap. None if there is not enough data.
@@ -291,37 +334,21 @@ class DQNAgent:
         if len(self.buffer) < max(batch_size, self.cfg.learning_starts):
             return None
 
-        # STEP 1: grab a random pile of past moves. Random on purpose: consecutive moves look
-        # almost identical and training on them in order would teach the same thing over and over.
+        # A random pile of past moves. Random on purpose: consecutive moves look almost
+        # identical and training on them in order teaches the same thing over and over.
         batch = self.buffer.sample(batch_size)
 
-        # STEP 2: what the network SAYS. It outputs a value for all three actions, but we only
-        # care about the one that was actually taken, so gather() picks that column out per row.
-        all_q = self.online(batch.obs) # (batch, 3)
-        predicted = all_q.gather(1, batch.actions.unsqueeze(1)).squeeze(1) # (batch,)
+        predicted = self._predicted_values(batch) # what the network says
+        targets = self._target_values(batch) # what it should have said
 
-        # STEP 3: what it SHOULD have said. This is the reward we really got, plus what we think
-        # the state we landed in is worth. no_grad because this is the thing we are aiming AT -
-        # we do not want to train the target to meet the prediction halfway.
-        with torch.no_grad():
-            next_q_online = self.online(batch.next_obs) # picks WHICH next action looks best
-            next_q_target = self.target(batch.next_obs) # says what that action is WORTH
-            targets = double_dqn_target(
-                batch.rewards, batch.terminated, next_q_online, next_q_target, self.cfg.gamma
-            )
-
-        # STEP 4: the gap between the two. Huber (smooth L1) rather than plain squared error,
-        # because a few wildly wrong targets should not yank the weights around.
+        # Huber (smooth L1) rather than plain squared error, so a few wildly wrong targets
+        # cannot yank the weights around.
         loss = nn.functional.smooth_l1_loss(predicted, targets)
 
-        # STEP 5: backpropagate and take the step.
-        self.optimizer.zero_grad(set_to_none=True) # clear last step's gradients
-        loss.backward() # work out which weights caused the gap
-        nn.utils.clip_grad_norm_(self.online.parameters(), self.cfg.grad_clip) # keep steps bounded
-        self.optimizer.step() # THIS is the line where the weights actually change
+        self._apply_gradients(loss)
 
-        self.updates += 1
-        self.samples += batch_size
+        self.updates += 1 # one more gradient step
+        self.samples += batch_size # and this many samples seen
 
         return float(loss.detach())
 
@@ -334,6 +361,7 @@ class DQNAgent:
     # -- saving and loading -------------------------------------------------
 
     def state_dict(self, include_buffer: bool = False) -> dict:
+        """Everything needed to rebuild this agent, optionally including replay."""
         state = {
             "online": self.online.state_dict(),
             "target": self.target.state_dict(),
@@ -349,19 +377,20 @@ class DQNAgent:
         return state
 
     def load_state_dict(self, state: dict) -> None:
-        self.online.load_state_dict(state["online"])
+        """Restore networks, optimizer and counters from a saved state."""
+        self.online.load_state_dict(state["online"]) # the weights we train
 
-        self.target.load_state_dict(state["target"])
-        self.target.requires_grad_(False)
+        self.target.load_state_dict(state["target"]) # the frozen copy of them
+        self.target.requires_grad_(False) # load_state_dict does not restore these
         self.target.eval()
 
-        self.optimizer.load_state_dict(state["optimizer"])
+        self.optimizer.load_state_dict(state["optimizer"]) # Adam's momentum and step counts
 
-        self.updates = int(state.get("updates", 0))
-        self.samples = int(state.get("samples", 0))
+        self.updates = int(state.get("updates", 0)) # gradient steps taken before the save
+        self.samples = int(state.get("samples", 0)) # samples seen before the save
 
         if "rng" in state:
-            self.rng.bit_generator.state = state["rng"]
+            self.rng.bit_generator.state = state["rng"] # carry on the same random stream
 
         if "buffer" in state:
-            self.buffer.load_state_dict(state["buffer"])
+            self.buffer.load_state_dict(state["buffer"]) # only there if it was saved
